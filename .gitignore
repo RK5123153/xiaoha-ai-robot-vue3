@@ -23,8 +23,8 @@ coverage
 *.njsproj
 *.sln
 *.sw?
-docs
 scripts
+docs
 
 *.tsbuildinfo
 
