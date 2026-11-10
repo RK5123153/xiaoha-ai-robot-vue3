@@ -76,7 +76,8 @@ import { computed, onBeforeUnmount, ref } from 'vue'
 import SvgIcon from '@/components/SvgIcon.vue'
 import { copyText } from '@/utils/clipboard.js'
 import { toPlainText } from '@/utils/plain-text.js'
-import { speakText, speechSupported, stopSpeaking } from '@/utils/speech.js'
+import { speechSupported } from '@/utils/speech.js'
+import { speakWithFallback, stopTts } from '@/utils/tts.js'
 
 const props = defineProps({
   /** 这条消息的 Markdown 原文（复制和朗读都用它） */
@@ -125,12 +126,15 @@ let copiedTimer = null
 /**
  * 朗读 / 停止朗读
  *
- * 再点一次是「停」：speakText 的 Promise 会被 stopSpeaking 收掉，
- * 于是 speaking 自然复位。
+ * 走 `speakWithFallback`：后端 TTS（MiniMax，音质好）优先，
+ * 后端没开或调不通时自动退回浏览器内置 TTS（speechSynthesis），用户无感。
+ *
+ * 再点一次是「停」：stopTts 会把后端音频和浏览器 TTS 一起掐掉，
+ * 正在 await 的 promise 会返回，于是 speaking 自然复位。
  */
 const toggleSpeak = async () => {
   if (speaking.value) {
-    stopSpeaking()
+    stopTts()
     speaking.value = false
     return
   }
@@ -138,7 +142,7 @@ const toggleSpeak = async () => {
 
   speaking.value = true
   try {
-    await speakText(text.value, {
+    await speakWithFallback(text.value, {
       onEnd: () => {
         speaking.value = false
       },
@@ -149,6 +153,8 @@ const toggleSpeak = async () => {
   } catch (e) {
     speaking.value = false
   }
+  // 兜底：无论走哪条路、以什么方式结束，按钮状态都要复位
+  speaking.value = false
 }
 
 /**
@@ -180,7 +186,7 @@ const emitFeedback = (rating) => {
 // 组件被销毁（切页面、消息被重渲染掉）时把朗读停掉，
 // 不然会听到一条已经不存在的消息的声音
 onBeforeUnmount(() => {
-  if (speaking.value) stopSpeaking()
+  if (speaking.value) stopTts()
   clearTimeout(copiedTimer)
 })
 </script>

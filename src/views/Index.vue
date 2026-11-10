@@ -94,9 +94,7 @@ import StreamMarkdownRender from '@/components/StreamMarkdownRender.vue'
 import MessageActions from '@/components/MessageActions.vue'
 import { parseChunkPayload } from '@/utils/sse.js'
 import { lastRegenerableId, turnIndexOf as turnIndexOfMessage } from '@/utils/chat-turn.js'
-
-/** 后端接口地址（换环境时只改这一处） */
-const API_BASE = 'http://localhost:8080/v2/ai'
+import { API_BASE } from '@/utils/api.js'
 
 const message = ref('')
 const textareaRef = ref(null)
