@@ -126,6 +126,17 @@ const requestSpeech = async (text, signal) => {
 }
 
 /**
+ * 通知「开始出声了」（只通知一次）
+ *
+ * @param {object} s 会话对象
+ */
+const notifyPlaying = (s) => {
+  if (s.playingNotified) return
+  s.playingNotified = true
+  s.onPlaying?.()
+}
+
+/**
  * 播放一个音频 blob，播完（或失败）后 resolve
  *
  * @param {Blob} blob
@@ -168,9 +179,17 @@ const playBlob = (blob, s) =>
 
     // ⚠️ play() 可能被浏览器自动播放策略拒掉（没有用户手势时），
     //    reject 之后走 fallback 退回浏览器 TTS。
+    // play() 的 promise 在**真正开始出声**时才 resolve —— 用它来通知
+    // 「开始播了」，UI 就能把转圈换成正在播的样子。
     const p = audio.play()
-    if (p && typeof p.catch === 'function') {
-      p.catch(() => finish(false))
+    if (p && typeof p.then === 'function') {
+      p.then(
+        () => notifyPlaying(s),
+        () => finish(false)
+      )
+    } else {
+      // 老浏览器没有 promise：只能乐观地认为已经开始了
+      notifyPlaying(s)
     }
   })
 
@@ -221,7 +240,10 @@ const speakViaBackend = async (text, s, handlers) => {
  *
  * @param {string} text 纯文本（先用 `toPlainText` 剥掉 Markdown）
  * @param {object} [handlers]
- * @param {Function} [handlers.onStart] 开始朗读
+ * @param {Function} [handlers.onStart] 流程开始（已经准备去请求了）
+ * @param {Function} [handlers.onPlaying] **真的开始出声了**
+ *   后端要合成一两秒，这段时间和「正在播」是两种状态，UI 得区分开
+ *   （一个转圈，一个高亮）。
  * @param {Function} [handlers.onEnd] 朗读结束/被打断
  * @param {Function} [handlers.onError] 出错
  * @returns {Promise<string>} 实际走的哪条路：
@@ -235,18 +257,21 @@ export const speakWithFallback = async (text, handlers = {}) => {
 
   // 停掉上一条（不管它走的是哪条路）
   stopTts()
+  handlers.onStart?.()
 
   const s = {
     cancelled: false,
     audio: null,
     url: null,
     resolvePlay: null,
+    // 「开始出声了」只通知一次
+    playingNotified: false,
+    onPlaying: handlers.onPlaying,
     controller: typeof AbortController !== 'undefined' ? new AbortController() : null,
   }
   session = s
 
   if (USE_BACKEND_TTS) {
-    handlers.onStart?.()
     const result = await speakViaBackend(text, s, handlers)
     if (result === 'played') {
       if (session === s) session = null
@@ -264,6 +289,11 @@ export const speakWithFallback = async (text, handlers = {}) => {
     handlers.onError?.(new Error('当前浏览器不支持语音朗读'))
     return 'unsupported'
   }
-  await speakText(text, handlers)
+  // 浏览器 TTS 的 onStart（语音列表就绪、马上要念了）就是「开始出声」
+  await speakText(text, {
+    onStart: handlers.onPlaying,
+    onEnd: handlers.onEnd,
+    onError: handlers.onError,
+  })
   return 'browser'
 }

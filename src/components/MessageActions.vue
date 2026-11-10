@@ -11,13 +11,51 @@
     <button
       type="button"
       class="action-btn"
-      :class="{ 'is-active': speaking }"
+      :class="{ 'is-active': speaking, 'is-loading': loading }"
       :disabled="!canSpeak || !text"
-      :title="speaking ? '停止朗读' : '朗读'"
-      :aria-label="speaking ? '停止朗读' : '朗读'"
+      :title="speechLabel"
+      :aria-label="speechLabel"
       @click="toggleSpeak"
     >
-      <SvgIcon name="speaker" customCss="w-[17px] h-[17px]"></SvgIcon>
+      <!--
+        三种图标：
+          正在播 → 跳动的音波（蓝）
+          正在准备 → 带缺口的圆弧在转（灰）
+          平时 → 喇叭（灰）
+        ⚠️ 音波和圆弧是**内联 SVG**，不是雪碧图里的图标 ——
+           雪碧图用 <use> 渲染，里面的元素没法用 CSS 动（动不了）。
+      -->
+      <svg
+        v-if="speaking"
+        class="wave h-[17px] w-[17px]"
+        viewBox="0 0 24 24"
+        fill="none"
+        aria-hidden="true"
+      >
+        <rect class="wave-bar" x="2.2" y="8.5" width="2.6" height="7" rx="1.3" />
+        <rect class="wave-bar" x="6.5" y="6" width="2.6" height="12" rx="1.3" />
+        <rect class="wave-bar" x="10.8" y="3.5" width="2.6" height="17" rx="1.3" />
+        <rect class="wave-bar" x="15.1" y="6" width="2.6" height="12" rx="1.3" />
+        <rect class="wave-bar" x="19.4" y="8.5" width="2.6" height="7" rx="1.3" />
+      </svg>
+      <svg
+        v-else-if="loading"
+        class="spin h-[17px] w-[17px]"
+        viewBox="0 0 24 24"
+        fill="none"
+        aria-hidden="true"
+      >
+        <circle
+          cx="12"
+          cy="12"
+          r="9"
+          stroke="currentColor"
+          stroke-width="2.6"
+          stroke-linecap="round"
+          stroke-dasharray="40 16.5"
+        />
+      </svg>
+      <SvgIcon v-else name="speaker" customCss="w-[17px] h-[17px]"></SvgIcon>
     </button>
 
     <!-- 复制 -->
@@ -115,8 +153,20 @@ const canSpeak = ref(speechSupported())
 
 /** 正在朗读 */
 const speaking = ref(false)
+/**
+ * 正在准备（等后端合成音频 / 等浏览器语音列表）
+ *
+ * 后端合成要一两秒，这个空档必须有个反馈 —— 不然点了没反应，
+ * 用户会以为按钮坏了，连点好几下。
+ */
+const loading = ref(false)
 /** 刚复制完（图标切成对勾，1.5 秒后恢复） */
 const copied = ref(false)
+
+/** 朗读按钮的文案（状态不同文案不同） */
+const speechLabel = computed(() =>
+  loading.value ? '准备中' : speaking.value ? '停止朗读' : '朗读'
+)
 
 /** 朗读用的纯文本（剥掉 Markdown 标记，免得把 ``` 和 ** 念出来） */
 const text = computed(() => toPlainText(props.content))
@@ -129,31 +179,46 @@ let copiedTimer = null
  * 走 `speakWithFallback`：后端 TTS（MiniMax，音质好）优先，
  * 后端没开或调不通时自动退回浏览器内置 TTS（speechSynthesis），用户无感。
  *
+ * 三个状态：
+ *   loading  —— 点了之后、等音频这段时间（喇叭转圈）
+ *   speaking —— 正在出声（喇叭高亮，再点是「停」）
+ *   都不是   —— 平时（喇叭灰的）
+ *
  * 再点一次是「停」：stopTts 会把后端音频和浏览器 TTS 一起掐掉，
- * 正在 await 的 promise 会返回，于是 speaking 自然复位。
+ * 正在 await 的 promise 会返回，于是状态自然复位。
  */
 const toggleSpeak = async () => {
-  if (speaking.value) {
+  if (loading.value || speaking.value) {
     stopTts()
+    loading.value = false
     speaking.value = false
     return
   }
   if (!text.value) return
 
-  speaking.value = true
+  loading.value = true
   try {
     await speakWithFallback(text.value, {
+      // 真的出声了 → 转圈换成正在播
+      onPlaying: () => {
+        loading.value = false
+        speaking.value = true
+      },
       onEnd: () => {
+        loading.value = false
         speaking.value = false
       },
       onError: () => {
+        loading.value = false
         speaking.value = false
       },
     })
   } catch (e) {
+    loading.value = false
     speaking.value = false
   }
   // 兜底：无论走哪条路、以什么方式结束，按钮状态都要复位
+  loading.value = false
   speaking.value = false
 }
 
@@ -186,7 +251,7 @@ const emitFeedback = (rating) => {
 // 组件被销毁（切页面、消息被重渲染掉）时把朗读停掉，
 // 不然会听到一条已经不存在的消息的声音
 onBeforeUnmount(() => {
-  if (speaking.value) stopTts()
+  if (speaking.value || loading.value) stopTts()
   clearTimeout(copiedTimer)
 })
 </script>
@@ -219,6 +284,48 @@ onBeforeUnmount(() => {
 .action-btn.is-active {
   color: #4d6bfe;
   background: rgba(77, 107, 254, 0.1);
+}
+
+/* 加载中（等后端合成音频）：灰弧 + 淡灰底，跟「正在朗读」的蓝音波区分开 */
+.action-btn.is-loading {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+/* 正在播：跳动的音波条 */
+.wave-bar {
+  fill: currentColor;
+  /* scaleY 要绕**每根条自己**的中心缩放，
+     不加这两行的话会绕整个 viewBox 的中心缩 —— 看着像整体拉伸 */
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: wave-bounce 0.9s ease-in-out infinite;
+}
+/* 每根条错开一点 —— 齐步走的话像呼吸，均衡错开才是波浪 */
+.wave-bar:nth-child(1) { animation-delay: 0s; }
+.wave-bar:nth-child(2) { animation-delay: -0.18s; }
+.wave-bar:nth-child(3) { animation-delay: -0.36s; }
+.wave-bar:nth-child(4) { animation-delay: -0.54s; }
+.wave-bar:nth-child(5) { animation-delay: -0.72s; }
+
+@keyframes wave-bounce {
+  0%,
+  100% {
+    transform: scaleY(0.32);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+/* 正在准备：带缺口的圆弧在转 */
+.spin {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .action-btn:disabled {
