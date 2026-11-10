@@ -9,6 +9,7 @@
 <script setup>
 import { ref, watch } from 'vue'
 import { renderMarkdown } from '@/utils/markdown'
+import { copyText } from '@/utils/clipboard.js'
 
 /**
  * 流式 Markdown 渲染组件
@@ -58,6 +59,7 @@ watch(
  *    直接读 <code>.textContent，天然拿到原始文本（高亮用的 <span> 不影响 textContent）。
  * 2. navigator.clipboard 只在 https / localhost 等安全上下文可用，
  *    页面用 http 访问时 writeText 直接 undefined，要留 execCommand 兜底。
+ *    —— 这段逻辑抽到 utils/clipboard.js 了，消息底部的「复制」按钮共用同一份。
  */
 const handleClick = async (event) => {
   const target = event.target
@@ -75,33 +77,6 @@ const handleClick = async (event) => {
   setTimeout(() => {
     btn.textContent = '复制'
   }, 1500)
-}
-
-const copyText = async (text) => {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text)
-      return true
-    }
-  } catch (e) {
-    // 权限被拒时走下面的兜底
-  }
-
-  // 兜底：老办法（已被多数浏览器标记为 deprecated，但在非安全上下文里仍可用）
-  try {
-    const ta = document.createElement('textarea')
-    ta.value = text
-    ta.style.position = 'fixed'
-    ta.style.top = '-1000px'
-    ta.style.opacity = '0'
-    document.body.appendChild(ta)
-    ta.select()
-    const ok = document.execCommand('copy')
-    document.body.removeChild(ta)
-    return ok
-  } catch (e) {
-    return false
-  }
 }
 </script>
 

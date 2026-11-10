@@ -9,7 +9,7 @@
       @scroll="handleScroll"
     >
         <!-- 遍历聊天记录 -->
-        <template v-for="(chat, index) in chatList" :key="index">
+        <template v-for="(chat, index) in chatList" :key="chat.id">
           <!-- 用户提问消息（靠右） -->
           <div v-if="chat.role === 'user'" class="flex justify-end mb-4">
             <div class="quesiton-container">
@@ -36,6 +36,17 @@
                 <span>正在思考…</span>
               </div>
               <StreamMarkdownRender :content="chat.content" />
+              <!-- 消息底部的操作栏：朗读 / 复制 / 重新生成 / 点赞 / 点踩
+                   只在流式输出结束后出现（done），打字过程中显示没意义 -->
+              <MessageActions
+                v-if="chat.done && chat.content"
+                :content="chat.content"
+                :feedback="feedbackMap[chat.id] || ''"
+                :regenerating="isSending"
+                :can-regenerate="chat.turn > 0 && chat.id === regenerableId"
+                @regenerate="handleRegenerate(chat.id)"
+                @feedback="handleFeedback(chat.id, $event)"
+              />
             </div>
           </div>
         </template>
@@ -70,19 +81,43 @@
         </div>
         <div class="flex items-center justify-center text-xs text-gray-400 mt-2">内容由 AI 生成，请仔细甄别</div>
       </div>
+
+      <!-- 轻提示：接口未就绪之类的临时状态，3 秒后自动消失 -->
+      <div v-if="toast" class="toast">{{ toast }}</div>
     </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import SvgIcon from '@/components/SvgIcon.vue'
 import StreamMarkdownRender from '@/components/StreamMarkdownRender.vue'
+import MessageActions from '@/components/MessageActions.vue'
 import { parseChunkPayload } from '@/utils/sse.js'
+import { lastRegenerableId, turnIndexOf as turnIndexOfMessage } from '@/utils/chat-turn.js'
+
+/** 后端接口地址（换环境时只改这一处） */
+const API_BASE = 'http://localhost:8080/v2/ai'
 
 const message = ref('')
 const textareaRef = ref(null)
 const chatScrollRef = ref(null)
 const isSending = ref(false)
+
+/** 轻提示文案（空字符串 = 不显示） */
+const toast = ref('')
+let toastTimer = null
+const showToast = (text) => {
+  toast.value = text
+  clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => {
+    toast.value = ''
+  }, 3000)
+}
+
+/** 生成消息 id */
+const genId = () =>
+  globalThis.crypto?.randomUUID?.() ||
+  `m-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 
 /** 输入框最大高度（px）。超过就在输入框内部滚动，不把整个页面挤爆 */
 const MAX_INPUT_HEIGHT = 300
@@ -178,9 +213,28 @@ onMounted(() => {
 })
 
 // 聊天记录（默认问候语）
+// 每条消息都带 id：操作栏的反馈状态、重新生成都要按 id 定位到具体那一条
+// done 表示「这条消息输出完了」——操作栏只在 done 之后出现
 const chatList = ref([
-  { role: 'assistant', content: '我是小哈智能 AI 助手！✨ 我可以帮你解答各种问题，无论是学习、工作，还是日常生活中的小困惑，都可以找我聊聊。有什么我可以帮你的吗？😊' }
+  {
+    id: genId(),
+    role: 'assistant',
+    content: '我是小哈智能 AI 助手！✨ 我可以帮你解答各种问题，无论是学习、工作，还是日常生活中的小困惑，都可以找我聊聊。有什么我可以帮你的吗？😊',
+    done: true,
+    // 问候语不是某一轮提问的回答，turn = 0 → 不显示「重新生成」
+    turn: 0,
+  },
 ])
+
+/** 每条消息的点赞/点踩状态：{ [messageId]: 'up' | 'down' | '' } */
+const feedbackMap = ref({})
+
+/**
+ * 最后一条「有对应提问」的回答 —— 只有它能「重新生成」。
+ *
+ * 规则和理由写在 utils/chat-turn.js 里（那里有完整注释，也有单元测试兜着）。
+ */
+const regenerableId = computed(() => lastRegenerableId(chatList.value))
 
 /**
  * 最后一条消息的内容变化时滚动到底部
@@ -225,38 +279,23 @@ onBeforeUnmount(() => {
   closeSSE()
 })
 
-// 发送消息
-const sendMessage = async () => {
-  // 校验发送的消息不能为空，或正在发送中
-  if (!message.value.trim() || isSending.value) return
-
-  const userMessage = message.value.trim()
-  // 标记为发送中（按钮置灰、避免重复发送）
-  isSending.value = true
-
-  // 用户消息 + 占位的回复一起推，保证一次渲染出来，不会有中间的空白帧
-  chatList.value.push({ role: 'user', content: userMessage })
-  // 添加一个占位的回复消息。pending 表示"还没出正文",用来显示「正在思考…」
-  chatList.value.push({ role: 'assistant', content: '', pending: true })
-  const replyIndex = chatList.value.length - 1
+/**
+ * 发起一次流式请求，把正文写进第 replyIndex 条消息
+ *
+ * 单独抽出来是因为「发送」和「重新生成」共用同一套流式逻辑 ——
+ * 重新生成只是把同样的提问再发一次、写到同一条气泡里。
+ *
+ * @param {string} userMessage 用户提问原文
+ * @param {number} replyIndex  要写入的回复消息下标
+ */
+const startStream = (userMessage, replyIndex) => {
   // 通过 chatList 取（而不是直接持有 push 进去的原始对象）才能触发 Vue 响应式更新
   const reply = () => chatList.value[replyIndex]
-
-  // 清空输入框并把高度收回去。
-  // v-model 的值是异步刷新的，必须等 DOM 更新完再量高度，否则量到的还是旧内容的高度
-  message.value = ''
-  await nextTick()
-  autoResize()
-  // 焦点回到输入框，方便连续追问
-  textareaRef.value?.focus()
-
-  // 强制滚到底：用户刚发了消息，无条件跟随
-  scrollToBottom(true)
 
   try {
     // 建立 SSE 连接
     eventSource = new EventSource(
-      `http://localhost:8080/v2/ai/generateStream?message=${encodeURIComponent(userMessage)}&chatId=${encodeURIComponent(chatId)}`
+      `${API_BASE}/generateStream?message=${encodeURIComponent(userMessage)}&chatId=${encodeURIComponent(chatId)}`
     )
     const es = eventSource
 
@@ -291,7 +330,7 @@ const sendMessage = async () => {
         //    parseChunkPayload 同时认新旧两种格式,前后端谁先上线都行。
         responseText += parseChunkPayload(event.data)
 
-        // 更新最后一条消息
+        // 更新这条消息
         reply().content = responseText
         reply().pending = false
       }
@@ -310,6 +349,8 @@ const sendMessage = async () => {
         reply().content = serverError || '抱歉，请求出错了，请稍后重试。'
       }
       reply().pending = false
+      // done：输出结束 —— 操作栏（朗读/复制/重新生成/点赞/点踩）这时候才出现
+      reply().done = true
 
       // 关闭 SSE、解除发送中状态
       // 必须 close:否则浏览器会按重连策略再发一次同样的请求,AI 会重复回答一遍
@@ -321,8 +362,143 @@ const sendMessage = async () => {
     // 提示用户“请求出错”
     reply().content = '抱歉，请求出错了，请稍后重试。'
     reply().pending = false
+    reply().done = true
     isSending.value = false
   }
+}
+
+// 发送消息
+const sendMessage = async () => {
+  // 校验发送的消息不能为空，或正在发送中
+  if (!message.value.trim() || isSending.value) return
+
+  const userMessage = message.value.trim()
+  // 标记为发送中（按钮置灰、避免重复发送）
+  isSending.value = true
+
+  // 用户消息 + 占位的回复一起推，保证一次渲染出来，不会有中间的空白帧
+  chatList.value.push({ id: genId(), role: 'user', content: userMessage })
+  // 添加一个占位的回复消息。pending 表示"还没出正文",用来显示「正在思考…」
+  // turn：这是本次会话的第几轮（从 1 开始）——
+  //   问候语是第 0 轮，没有对应的提问，所以不显示「重新生成」按钮
+  const turn = chatList.value.filter((c) => c.role === 'user').length
+  chatList.value.push({ id: genId(), role: 'assistant', content: '', pending: true, done: false, turn })
+  const replyIndex = chatList.value.length - 1
+
+  // 清空输入框并把高度收回去。
+  // v-model 的值是异步刷新的，必须等 DOM 更新完再量高度，否则量到的还是旧内容的高度
+  message.value = ''
+  await nextTick()
+  autoResize()
+  // 焦点回到输入框，方便连续追问
+  textareaRef.value?.focus()
+
+  // 强制滚到底：用户刚发了消息，无条件跟随
+  scrollToBottom(true)
+
+  startStream(userMessage, replyIndex)
+}
+
+/**
+ * 回滚后端记忆里的最后一轮（重新生成的前置动作）
+ *
+ * ⚠️ 为什么必须有这一步：后端按 chatId 存对话记忆（[u1,a1,u2,a2,…]），
+ *    直接把同一个提问再发一次，模型会**看到上一版答案**再去回答 ——
+ *    变成「在旧答案上改写」，而不是 ChatGPT 那种「换一个答案」。
+ *    而且每点一次就往记忆文件里多追加一轮，聊久了记忆越来越脏。
+ *
+ * 这个接口后端还没实现（见 docs/ 里的方案文档）。
+ * 拿不到就返回 false，前端提示用户，**不硬发请求** ——
+ * 硬发会把上面两个问题坐实。
+ *
+ * @returns {Promise<boolean>} 是否成功回滚
+ */
+const rollbackLastTurn = async () => {
+  try {
+    const res = await fetch(`${API_BASE}/chats/${encodeURIComponent(chatId)}/last-turn`, {
+      method: 'DELETE',
+    })
+    return res.ok
+  } catch (e) {
+    return false
+  }
+}
+
+/**
+ * 重新生成：把上一轮的回答重答一遍
+ *
+ * @param {string} messageId 要重新生成的那条回复的消息 id
+ */
+const handleRegenerate = async (messageId) => {
+  if (isSending.value) return
+
+  // 只允许重新生成最后一条回答 —— 后端只能回滚最后一轮。
+  // 中间那条即使被点到了也不能放行（按钮本来就不显示，这里是兜底）
+  if (messageId !== regenerableId.value) return
+
+  const idx = chatList.value.findIndex((c) => c.id === messageId)
+  if (idx <= 0) return
+  // 重新生成的依据是它上面那条用户提问
+  const question = chatList.value[idx - 1]
+  if (!question || question.role !== 'user') return
+
+  isSending.value = true
+  try {
+    // 1. 先回滚记忆（见 rollbackLastTurn 的说明）
+    const rolled = await rollbackLastTurn()
+    if (!rolled) {
+      showToast('后端的「回滚最后一轮」接口还不可用，暂时不能重新生成')
+      isSending.value = false
+      return
+    }
+
+    // 2. 清空当前气泡，重新流式请求（写回同一条消息）
+    const target = chatList.value[idx]
+    target.content = ''
+    target.pending = true
+    target.done = false
+    scrollToBottom(true)
+
+    startStream(question.content, idx)
+  } catch (e) {
+    console.error('重新生成失败: ', e)
+    showToast('重新生成失败，请稍后重试')
+    isSending.value = false
+  }
+}
+
+/**
+ * 这条回复是本次会话的第几轮（从 1 开始；问候语是 0）
+ *
+ * 后端的记忆文件是 [u1,a1,u2,a2,…] 这种交替结构，
+ * 「第 k 轮的回答」对应记忆里第 2k-1 条 —— 拿它当反馈的定位标识。
+ * 规则和理由写在 utils/chat-turn.js 里。
+ */
+const turnIndexOf = (messageId) => turnIndexOfMessage(chatList.value, messageId)
+
+/**
+ * 点赞 / 点踩
+ *
+ * @param {string} messageId 消息 id
+ * @param {string} rating     'up' | 'down' | ''（空 = 取消）
+ */
+const handleFeedback = (messageId, rating) => {
+  feedbackMap.value[messageId] = rating
+  if (!rating) return
+
+  // 上报后端（接口还没上线时失败也无妨，本地状态照常生效）
+  // 取消点赞/点踩暂不上报 —— 后端按「最后一条记录为准」处理
+  fetch(`${API_BASE}/feedback`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chatId,
+      turnIndex: turnIndexOf(messageId),
+      rating,
+    }),
+  }).catch(() => {
+    // 后端接口还没上线，忽略
+  })
 }
 </script>
 
@@ -339,6 +515,24 @@ const sendMessage = async () => {
   border-radius: 14px;
   max-width: calc(100% - 48px);
   position: relative;
+}
+
+/* ---------- 轻提示 ---------- */
+.toast {
+  position: fixed;
+  left: 50%;
+  /* 落在输入框上方一点，别把「发送」按钮挡住 */
+  bottom: 108px;
+  transform: translateX(-50%);
+  z-index: 50;
+  max-width: 80vw;
+  padding: 8px 16px;
+  border-radius: 8px;
+  background: rgba(31, 41, 55, 0.92);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1.5;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
 }
 
 /* ---------- 聊天区滚动条：颜色淡一点，不抢正文视线 ---------- */

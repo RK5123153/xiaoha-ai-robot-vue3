@@ -11,6 +11,7 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    MessageActions: typeof import('./src/components/MessageActions.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
     StreamMarkdownRender: typeof import('./src/components/StreamMarkdownRender.vue')['default']
