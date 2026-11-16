@@ -11,6 +11,8 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    ImageChip: typeof import('./src/components/ImageChip.vue')['default']
+    ImagePicker: typeof import('./src/components/ImagePicker.vue')['default']
     MessageActions: typeof import('./src/components/MessageActions.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']

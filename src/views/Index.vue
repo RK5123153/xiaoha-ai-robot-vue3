@@ -2,6 +2,20 @@
     <!-- h-dvh 动态视口高度：移动端浏览器地址栏收起/弹出时，输入框不会掉出屏幕
          overflow-hidden：页面本身不滚动，滚动交给下面的聊天区 -->
     <div class="h-dvh max-w-3xl mx-auto flex flex-col overflow-hidden">
+      <!-- 模式切换：文字对话(有聊天记忆) / 看图说话(无状态) -->
+      <div class="shrink-0 pt-3 flex justify-center">
+        <div class="inline-flex items-center gap-1 p-1 rounded-full bg-gray-100">
+          <button
+            v-for="m in MODES"
+            :key="m.value"
+            type="button"
+            class="mode-tab"
+            :class="{ 'is-active': mode === m.value }"
+            @click="switchMode(m.value)"
+          >{{ m.label }}</button>
+        </div>
+      </div>
+
       <!-- 聊天记录区域：自己滚动，输入框始终钉在底部 -->
     <div
       class="chat-scroll flex-1 min-h-0 overflow-y-auto pt-4 px-4 pb-2"
@@ -13,6 +27,14 @@
           <!-- 用户提问消息（靠右） -->
           <div v-if="chat.role === 'user'" class="flex justify-end mb-4">
             <div class="quesiton-container">
+              <!-- 看图说话：图在文字上面，点一下能放大 -->
+              <img
+                v-if="chat.image"
+                :src="chat.image.previewUrl"
+                :alt="chat.image.name || '提问的图片'"
+                class="vision-thumb"
+                @click="openPreview(chat.image)"
+              />
               <p class="whitespace-pre-wrap break-words">{{ chat.content }}</p>
             </div>
           </div>
@@ -43,7 +65,7 @@
                 :content="chat.content"
                 :feedback="feedbackMap[chat.id] || ''"
                 :regenerating="isSending"
-                :can-regenerate="chat.turn > 0 && chat.id === regenerableId"
+                :can-regenerate="chat.turn > 0 && chat.id === regenerableIdOf(chat)"
                 @regenerate="handleRegenerate(chat.id)"
                 @feedback="handleFeedback(chat.id, $event)"
               />
@@ -54,10 +76,33 @@
 
       <!-- 发送消息输入框 -->
       <div class="w-full mb-5 shrink-0">
-        <div class="bg-gray-100 rounded-3xl px-4 py-3 flex flex-col mx-4 border border-gray-200">
+        <div
+          class="bg-gray-100 rounded-3xl px-4 py-3 flex flex-col mx-4 border border-gray-200 transition-colors"
+          :class="{ 'is-dropping': isDragOver }"
+          @dragenter.prevent="onDragEnter"
+          @dragover.prevent
+          @dragleave.prevent="onDragLeave"
+          @drop.prevent="onDrop"
+          @paste="onPaste"
+        >
+          <!-- 已选中的图片（还没发出去） -->
+          <div v-if="attachment" class="mb-2">
+            <ImageChip
+              :attachment="attachment"
+              :busy="preparingImage"
+              @remove="clearAttachment"
+              @preview="openPreview(attachment)"
+            />
+          </div>
+
+          <!-- 看图说话模式的提示：把「无状态」这件事说在前面，别让用户误以为模型记得上一张图 -->
+          <p v-if="mode === 'vision'" class="hint mb-1.5">
+            看图说话是「一张图 + 一个问题」的独立问答，不带聊天记忆
+          </p>
+
           <textarea
             v-model="message"
-            placeholder="给小哈 AI 机器人发送消息（Enter 发送，Shift + Enter 换行）"
+            :placeholder="mode === 'vision' ? '描述这张图…（留空就让模型自己描述）' : '给小哈 AI 机器人发送消息（Enter 发送，Shift + Enter 换行）'"
             class="bg-transparent border-none outline-none w-full text-sm resize-none min-h-[24px]"
             rows="2"
             @input="autoResize"
@@ -67,10 +112,16 @@
             ref="textareaRef"
           ></textarea>
           <!-- 发送按钮 -->
-        <div class="flex justify-end">
+        <div class="flex justify-end items-center gap-2">
+          <!-- 看图说话才需要选图；文字模式下不显示，免得以为文字也能带图 -->
+          <ImagePicker
+            v-if="mode === 'vision'"
+            :disabled="isSending || preparingImage"
+            @pick="onPickImage"
+          />
           <button
           @click="sendMessage"
-          :disabled="isSending || !message.trim()"
+          :disabled="sendDisabled"
           aria-label="发送消息"
           title="发送（Enter）"
           class="flex items-center justify-center bg-[#4d6bfe] text-white rounded-full w-8 h-8 border border-[#4d6bfe] hover:bg-[#3b5bef] transition-colors
@@ -84,6 +135,11 @@
 
       <!-- 轻提示：接口未就绪之类的临时状态，3 秒后自动消失 -->
       <div v-if="toast" class="toast">{{ toast }}</div>
+
+      <!-- 图片放大预览：点遮罩或按 Esc 关闭 -->
+      <div v-if="previewUrl" class="preview-overlay" @click="previewUrl = ''">
+        <img :src="previewUrl" class="preview-img" alt="预览" @click.stop />
+      </div>
     </div>
 </template>
 
@@ -92,9 +148,22 @@ import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import SvgIcon from '@/components/SvgIcon.vue'
 import StreamMarkdownRender from '@/components/StreamMarkdownRender.vue'
 import MessageActions from '@/components/MessageActions.vue'
+import ImagePicker from '@/components/ImagePicker.vue'
+import ImageChip from '@/components/ImageChip.vue'
 import { parseChunkPayload } from '@/utils/sse.js'
 import { lastRegenerableId, turnIndexOf as turnIndexOfMessage } from '@/utils/chat-turn.js'
 import { API_BASE } from '@/utils/api.js'
+import { prepareImage, isImageFile } from '@/utils/image.js'
+import { sendVisionStream, DEFAULT_QUESTION } from '@/utils/vision.js'
+
+/** 两种对话模式。kind 会记在每条消息上，用来决定走哪条后端链路 */
+const MODES = [
+  { value: 'text', label: '文字对话' },
+  { value: 'vision', label: '看图说话' },
+]
+
+/** 当前模式：text = 文字对话(有记忆) / vision = 看图说话(无状态) */
+const mode = ref('text')
 
 const message = ref('')
 const textareaRef = ref(null)
@@ -116,6 +185,40 @@ const showToast = (text) => {
 const genId = () =>
   globalThis.crypto?.randomUUID?.() ||
   `m-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+
+/**
+ * 从网址里取一个参数
+ *
+ * ⚠️ 这个项目用的是 **hash 路由**(createWebHashHistory),网址长这样:
+ *      http://localhost:5173/#/?visionModel=m3
+ *    查询参数在 **# 后面**,`location.search` 是空的!
+ *    所以 hash 和 search 两处都得看。
+ *
+ * @param {string} name 参数名
+ * @returns {string} 没有就是空字符串
+ */
+const urlParam = (name) => {
+  const hash = location.hash || ''
+  const q = hash.indexOf('?')
+  const fromHash = q === -1 ? '' : hash.slice(q + 1)
+  const params = new URLSearchParams(`${location.search}&${fromHash}`)
+  return (params.get(name) || '').trim()
+}
+
+/**
+ * 看图说话用哪个模型 —— 默认留空 = 后端的 `app.multimodal.default-model` 说了算
+ *
+ * 为什么要留这个口子:
+ *   后端现在的默认模型是 `qwen-omni`(阿里百炼),而开发环境**没配百炼的 API key**,
+ *   点一次就会收到 503「provider 'bailian' 没有配置 API key」。
+ *   而 minimax(MiniMax-M3)既配了 key 又支持图片,是能直接用的。
+ *
+ *   前端**不写死**模型名 —— 那是后端配置的事,写死了以后后端换了模型前端还在用旧的。
+ *   这里只留一个网址参数当逃生口:
+ *      http://localhost:5173/#/?visionModel=m3
+ *   （后端那边把 `app.multimodal.default-model` 改成 m3 之后,就不用带这个参数了。）
+ */
+const visionModel = urlParam('visionModel')
 
 /** 输入框最大高度（px）。超过就在输入框内部滚动，不把整个页面挤爆 */
 const MAX_INPUT_HEIGHT = 300
@@ -213,10 +316,12 @@ onMounted(() => {
 // 聊天记录（默认问候语）
 // 每条消息都带 id：操作栏的反馈状态、重新生成都要按 id 定位到具体那一条
 // done 表示「这条消息输出完了」——操作栏只在 done 之后出现
+// kind 表示这条消息属于哪种对话：'text' 走 /v2(有记忆) / 'vision' 走 /v9(无状态)
 const chatList = ref([
   {
     id: genId(),
     role: 'assistant',
+    kind: 'text',
     content: '我是小哈智能 AI 助手！✨ 我可以帮你解答各种问题，无论是学习、工作，还是日常生活中的小困惑，都可以找我聊聊。有什么我可以帮你的吗？😊',
     done: true,
     // 问候语不是某一轮提问的回答，turn = 0 → 不显示「重新生成」
@@ -230,9 +335,18 @@ const feedbackMap = ref({})
 /**
  * 最后一条「有对应提问」的回答 —— 只有它能「重新生成」。
  *
+ * 文字对话和看图说话**分别算**：
+ *   文字对话要回滚后端记忆（只会回滚最后一轮），所以只能重新生成最后一条；
+ *   看图说话是无状态的，没有记忆可回滚，但 UI 上也保持「只给最新一条显示按钮」的一致性。
+ *
  * 规则和理由写在 utils/chat-turn.js 里（那里有完整注释，也有单元测试兜着）。
  */
-const regenerableId = computed(() => lastRegenerableId(chatList.value))
+const textRegenerableId = computed(() => lastRegenerableId(chatList.value, 'text'))
+const visionRegenerableId = computed(() => lastRegenerableId(chatList.value, 'vision'))
+
+/** 这条消息能不能点「重新生成」（按类型分别看各自的最后一条） */
+const regenerableIdOf = (chat) =>
+  (chat.kind ?? 'text') === 'vision' ? visionRegenerableId.value : textRegenerableId.value
 
 /**
  * 最后一条消息的内容变化时滚动到底部
@@ -261,6 +375,19 @@ const chatId = (() => {
   return uuid || `web-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 })()
 
+/**
+ * 看图说话专用的 chatId —— 只用于「点赞/点踩」上报时做区分。
+ *
+ * ⚠️ /v9/ai 是无状态的,压根不收 chatId,也没有对应的记忆文件。
+ *    但反馈接口是共用的(POST /v2/ai/feedback),如果不换个 id,
+ *    看图说话的轮次号会和文字对话的轮次号混在一起 —— 后端只是往 JSONL 里追加一行,
+ *    不校验,但事后对账时反馈就指错回答了。
+ */
+const visionChatId = (() => {
+  const uuid = globalThis.crypto?.randomUUID?.()
+  return uuid || `web-vision-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+})()
+
 // SSE 连接
 let eventSource = null
 
@@ -272,10 +399,182 @@ const closeSSE = () => {
   }
 }
 
+/** 看图说话那条链路的请求控制器（用来中途掐断） */
+let visionController = null
+
 // 组件卸载时自动关闭连接
 onBeforeUnmount(() => {
   closeSSE()
+  // ⚠️ 走 fetch 的那条链路不会自动断,得手动 abort ——
+  //    否则组件没了请求还在跑,白白烧后端的 token
+  visionController?.abort()
+  // object URL 不回收会一直占着内存(每个都是一个 Blob 的引用)
+  objectUrls.forEach((url) => URL.revokeObjectURL(url))
+  objectUrls.length = 0
 })
+
+/* ──────────────────────────────────────────────────────────────────────
+ * 看图说话：图片的选择、压缩、预览
+ * ────────────────────────────────────────────────────────────────────── */
+
+/** 待发送的图片：{ id, file, previewUrl, name, size } */
+const attachment = ref(null)
+
+/** 正在处理（压缩）图片 —— 大图要缩放，有几百毫秒的空档 */
+const preparingImage = ref(false)
+
+/** 拖拽悬停在输入框上（高亮提示「可以放这儿」） */
+const isDragOver = ref(false)
+
+/**
+ * 创建过的 object URL
+ *
+ * 统一在组件卸载时回收。图片发出去之后缩略图还要留在气泡里，
+ * 所以中途不能随便 revoke —— 只在「确定没人再引用」时才释放。
+ */
+const objectUrls = []
+
+/**
+ * 释放一个 object URL（如果还有消息在用它，就留着）
+ *
+ * @param {string} url
+ */
+const releaseObjectUrl = (url) => {
+  if (!url) return
+  // 消息气泡里的缩略图还在用这个 URL → 不能回收
+  if (chatList.value.some((c) => c.image?.previewUrl === url)) return
+  const i = objectUrls.indexOf(url)
+  if (i !== -1) {
+    objectUrls.splice(i, 1)
+    URL.revokeObjectURL(url)
+  }
+}
+
+/**
+ * 选好一张图（点了按钮 / 粘贴 / 拖拽都走这里）
+ *
+ * @param {File} file
+ */
+const onPickImage = async (file) => {
+  if (!file || isSending.value) return
+  preparingImage.value = true
+  try {
+    // 压缩到大后端能收的体积（Spring 容器默认只收 1MB）
+    const { file: prepared } = await prepareImage(file)
+    const previewUrl = URL.createObjectURL(prepared)
+    objectUrls.push(previewUrl)
+
+    const old = attachment.value
+    attachment.value = {
+      id: genId(),
+      file: prepared,
+      previewUrl,
+      name: prepared.name,
+      size: prepared.size,
+    }
+    // 换掉的旧图没人引用了才回收
+    if (old) releaseObjectUrl(old.previewUrl)
+  } catch (e) {
+    console.error('图片处理失败: ', e)
+    showToast(e.message || '这个文件不能当图片用')
+  } finally {
+    preparingImage.value = false
+  }
+}
+
+/** 移除待发送的图片 */
+const clearAttachment = () => {
+  const old = attachment.value
+  attachment.value = null
+  if (old) releaseObjectUrl(old.previewUrl)
+}
+
+/** 拖拽进入计数器：dragenter/dragleave 会在子元素间反复触发，用计数才不会闪 */
+let dragDepth = 0
+
+const onDragEnter = () => {
+  if (mode.value !== 'vision') return
+  dragDepth++
+  isDragOver.value = true
+}
+
+const onDragLeave = () => {
+  if (mode.value !== 'vision') return
+  dragDepth = Math.max(0, dragDepth - 1)
+  if (dragDepth === 0) isDragOver.value = false
+}
+
+/**
+ * 放下文件
+ *
+ * ⚠️ 只认图片:拖进来一个 txt 的话,后端会 400，
+ *    而且 Spring AI 会**静默丢掉**非图片附件（症状是「图没发出去，模型只看到一句话」），
+ *    所以前端先拦一道，给人话。
+ */
+const onDrop = (e) => {
+  dragDepth = 0
+  isDragOver.value = false
+  if (mode.value !== 'vision') return
+  const files = e.dataTransfer?.files || []
+  for (const f of files) {
+    if (isImageFile(f)) {
+      onPickImage(f)
+      return
+    }
+  }
+  showToast('只能把图片拖进来')
+}
+
+/**
+ * 粘贴图片（截图工具 / 右键复制图片）
+ *
+ * ⚠️ 不 preventDefault：剪贴板里可能同时有图和字（比如从网页复制一段），
+ *    把文字也挡掉的话用户会觉得「粘贴失灵了」。
+ */
+const onPaste = (e) => {
+  if (mode.value !== 'vision') return
+  const items = e.clipboardData?.items
+  if (!items) return
+  for (const item of items) {
+    if (item.kind === 'file' && item.type?.startsWith('image/')) {
+      const file = item.getAsFile()
+      if (file) {
+        onPickImage(file)
+        return
+      }
+    }
+  }
+}
+
+/** 放大的图片预览（点遮罩关闭） */
+const previewUrl = ref('')
+
+const openPreview = (image) => {
+  if (image?.previewUrl) previewUrl.value = image.previewUrl
+}
+
+/** Esc 关掉预览 */
+const handlePreviewKeydown = (e) => {
+  if (e.key === 'Escape') previewUrl.value = ''
+}
+onMounted(() => window.addEventListener('keydown', handlePreviewKeydown))
+onBeforeUnmount(() => window.removeEventListener('keydown', handlePreviewKeydown))
+
+/**
+ * 切换对话模式
+ *
+ * 切走的时候把待发送的图片丢掉 —— 文字模式下留着它没有意义,
+ * 下次切回来发现「怎么还挂着一张图」会让人困惑。
+ */
+const switchMode = (next) => {
+  if (mode.value === next) return
+  mode.value = next
+  if (next !== 'vision') clearAttachment()
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+ * 发送
+ * ────────────────────────────────────────────────────────────────────── */
 
 /**
  * 发起一次流式请求，把正文写进第 replyIndex 条消息
@@ -365,22 +664,96 @@ const startStream = (userMessage, replyIndex) => {
   }
 }
 
+/**
+ * 问一次「这张图里是什么」
+ *
+ * 走的是 **fetch + ReadableStream**，不是 EventSource ——
+ * 上传文件必须用 POST multipart，而 EventSource 只能发 GET。
+ *
+ * @param {File} file      要看的图
+ * @param {string} question 问什么
+ * @param {number} replyIndex 写到第几条回复
+ */
+const runVisionRequest = async (file, question, replyIndex) => {
+  const reply = () => chatList.value[replyIndex]
+  const controller = new AbortController()
+  visionController = controller
+  // 后端说「模型没吐出正文」时给的原因(比如思考链把 max_tokens 吃光了)
+  let serverError = ''
+
+  try {
+    await sendVisionStream({
+      file,
+      message: question,
+      model: visionModel,
+      signal: controller.signal,
+      onThinking: () => {
+        // 正文还没出来时维持「正在思考…」;出正文了就撤掉
+        if (!reply().content) reply().pending = true
+      },
+      onServerError: (reason) => {
+        serverError = reason
+      },
+      onChunk: (_delta, all) => {
+        reply().content = all
+        reply().pending = false
+      },
+    })
+    // 流正常结束却一个字都没有 → 给个能看的提示，别留个空气泡
+    if (!reply().content) {
+      reply().content = serverError || '抱歉，模型这次没返回内容，请再试一次。'
+    }
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      reply().content = reply().content || '已取消。'
+    } else {
+      console.error('看图说话失败: ', e)
+      // 已经收到一部分正文就留着（用户还能看到模型答了一半的内容），
+      // 什么都没有才用错误原因顶上
+      reply().content = reply().content || e.message || '抱歉，请求出错了，请稍后重试。'
+    }
+  } finally {
+    reply().pending = false
+    reply().done = true
+    if (visionController === controller) visionController = null
+    isSending.value = false
+  }
+}
+
+/** 发送按钮该不该禁用 */
+const sendDisabled = computed(() => {
+  if (isSending.value || preparingImage.value) return true
+  // 看图说话：有图就能发（问题可以留空，让模型自己描述）
+  if (mode.value === 'vision') return !attachment.value
+  return !message.value.trim()
+})
+
 // 发送消息
 const sendMessage = async () => {
-  // 校验发送的消息不能为空，或正在发送中
-  if (!message.value.trim() || isSending.value) return
+  if (isSending.value || preparingImage.value) return
+  if (mode.value === 'vision') return sendVisionMessage()
+  return sendTextMessage()
+}
 
+/**
+ * 发一条纯文字提问
+ */
+const sendTextMessage = async () => {
   const userMessage = message.value.trim()
+  if (!userMessage) return
+
   // 标记为发送中（按钮置灰、避免重复发送）
   isSending.value = true
 
   // 用户消息 + 占位的回复一起推，保证一次渲染出来，不会有中间的空白帧
-  chatList.value.push({ id: genId(), role: 'user', content: userMessage })
+  chatList.value.push({ id: genId(), role: 'user', kind: 'text', content: userMessage })
   // 添加一个占位的回复消息。pending 表示"还没出正文",用来显示「正在思考…」
   // turn：这是本次会话的第几轮（从 1 开始）——
   //   问候语是第 0 轮，没有对应的提问，所以不显示「重新生成」按钮
-  const turn = chatList.value.filter((c) => c.role === 'user').length
-  chatList.value.push({ id: genId(), role: 'assistant', content: '', pending: true, done: false, turn })
+  //   ⚠️ 只数**文字**消息：后端的记忆里只有文字轮次，
+  //      把看图说话的提问也数进去会跟后端对不上（反馈的 turnIndex 会指错）
+  const turn = chatList.value.filter((c) => c.role === 'user' && (c.kind ?? 'text') === 'text').length
+  chatList.value.push({ id: genId(), role: 'assistant', kind: 'text', content: '', pending: true, done: false, turn })
   const replyIndex = chatList.value.length - 1
 
   // 清空输入框并把高度收回去。
@@ -395,6 +768,57 @@ const sendMessage = async () => {
   scrollToBottom(true)
 
   startStream(userMessage, replyIndex)
+}
+
+/**
+ * 发一条「看图说话」的提问
+ */
+const sendVisionMessage = async () => {
+  const att = attachment.value
+  if (!att) return
+
+  // 什么都没写就让模型自己描述（后端也有一份默认值，这里自己给更可控）
+  const question = message.value.trim() || DEFAULT_QUESTION
+  isSending.value = true
+
+  // 轮次：看图说话自己一套编号，不跟文字对话混
+  const turn =
+    chatList.value.filter((c) => c.role === 'user' && (c.kind ?? 'text') === 'vision').length + 1
+
+  chatList.value.push({
+    id: genId(),
+    role: 'user',
+    kind: 'vision',
+    content: question,
+    // 缩略图给气泡用；file 留着给「重新生成」——
+    //   /v9 是无状态的，重新生成就是把同一张图再发一次，不用回滚任何东西
+    image: { previewUrl: att.previewUrl, name: att.name },
+    file: att.file,
+    turn,
+  })
+  chatList.value.push({
+    id: genId(),
+    role: 'assistant',
+    kind: 'vision',
+    content: '',
+    pending: true,
+    done: false,
+    turn,
+  })
+  // ⚠️ 必须在**推完回复消息之后**再算下标 ——
+  //    早一行的话这个下标指向的是用户消息，模型的回答会写进用户气泡里，
+  //    而真正的回复气泡一直停在「正在思考…」(done 永远是 false，操作栏不出现)。
+  const replyIndex = chatList.value.length - 1
+
+  // 图已经随消息发出去了，输入框复位
+  attachment.value = null
+  message.value = ''
+  await nextTick()
+  autoResize()
+  textareaRef.value?.focus()
+  scrollToBottom(true)
+
+  await runVisionRequest(att.file, question, replyIndex)
 }
 
 /**
@@ -430,12 +854,22 @@ const rollbackLastTurn = async () => {
 const handleRegenerate = async (messageId) => {
   if (isSending.value) return
 
-  // 只允许重新生成最后一条回答 —— 后端只能回滚最后一轮。
-  // 中间那条即使被点到了也不能放行（按钮本来就不显示，这里是兜底）
-  if (messageId !== regenerableId.value) return
-
   const idx = chatList.value.findIndex((c) => c.id === messageId)
   if (idx <= 0) return
+  const target = chatList.value[idx]
+  if ((target.kind ?? 'text') === 'vision') return regenerateVision(idx)
+  return regenerateText(idx)
+}
+
+/**
+ * 重新生成一条**文字**回答
+ *
+ * 要先回滚后端记忆，否则模型是在旧答案上改写（见 rollbackLastTurn 的说明）。
+ */
+const regenerateText = async (idx) => {
+  // 只允许重新生成最后一条回答 —— 后端只能回滚最后一轮。
+  // 中间那条即使被点到了也不能放行（按钮本来就不显示，这里是兜底）
+  if (chatList.value[idx].id !== textRegenerableId.value) return
   // 重新生成的依据是它上面那条用户提问
   const question = chatList.value[idx - 1]
   if (!question || question.role !== 'user') return
@@ -466,6 +900,27 @@ const handleRegenerate = async (messageId) => {
 }
 
 /**
+ * 重新生成一条**看图说话**的回答
+ *
+ * ⚠️ 不用回滚：/v9/ai 是无状态的，没有记忆文件可回滚 ——
+ *    直接把同一张图 + 同一个问题再发一次就行。
+ */
+const regenerateVision = async (idx) => {
+  if (chatList.value[idx].id !== visionRegenerableId.value) return
+  const question = chatList.value[idx - 1]
+  if (!question || question.role !== 'user' || !question.file) return
+
+  isSending.value = true
+  const target = chatList.value[idx]
+  target.content = ''
+  target.pending = true
+  target.done = false
+  scrollToBottom(true)
+
+  await runVisionRequest(question.file, question.content, idx)
+}
+
+/**
  * 这条回复是本次会话的第几轮（从 1 开始；问候语是 0）
  *
  * 后端的记忆文件是 [u1,a1,u2,a2,…] 这种交替结构，
@@ -484,13 +939,18 @@ const handleFeedback = (messageId, rating) => {
   feedbackMap.value[messageId] = rating
   if (!rating) return
 
+  const msg = chatList.value.find((c) => c.id === messageId)
+  const isVision = (msg?.kind ?? 'text') === 'vision'
+
   // 上报后端（接口还没上线时失败也无妨，本地状态照常生效）
   // 取消点赞/点踩暂不上报 —— 后端按「最后一条记录为准」处理
   fetch(`${API_BASE}/feedback`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      chatId,
+      // ⚠️ 看图说话用自己的 chatId：它没有记忆，
+      //    共用一个的话反馈里的 turnIndex 会和文字对话的撞车
+      chatId: isVision ? visionChatId : chatId,
       turnIndex: turnIndexOf(messageId),
       rating,
     }),
@@ -513,6 +973,70 @@ const handleFeedback = (messageId, rating) => {
   border-radius: 14px;
   max-width: calc(100% - 48px);
   position: relative;
+}
+
+/* ---------- 模式切换 ---------- */
+.mode-tab {
+  padding: 5px 14px;
+  border-radius: 9999px;
+  font-size: 12px;
+  line-height: 18px;
+  color: #6b7280;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.mode-tab.is-active {
+  color: #262626;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+/* ---------- 看图说话 ---------- */
+/* 拖拽悬停：告诉用户「可以放这儿」 */
+.is-dropping {
+  background: #eff6ff;
+  border-color: #4d6bfe;
+}
+
+.hint {
+  font-size: 11px;
+  line-height: 16px;
+  color: #9ca3af;
+}
+
+/* 提问气泡里的图片 */
+.vision-thumb {
+  display: block;
+  max-width: 100%;
+  max-height: 220px;
+  width: auto;
+  border-radius: 10px;
+  margin-bottom: 6px;
+  cursor: zoom-in;
+}
+
+/* 图片放大预览 */
+.preview-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(17, 24, 39, 0.75);
+  cursor: zoom-out;
+}
+
+.preview-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 8px;
+  cursor: default;
 }
 
 /* ---------- 轻提示 ---------- */
@@ -555,4 +1079,3 @@ const handleFeedback = (messageId, rating) => {
 }
 
 </style>
-  

@@ -57,6 +57,118 @@
  */
 const ENVELOPE_HEAD = /^\{\s*"v"\s*:/
 
+/* ──────────────────────────────────────────────────────────────────────
+ * 原始字节流 → SSE 帧
+ *
+ * 为什么要自己解析:
+ *   浏览器的 `EventSource` **只能发 GET** —— 传文件(multipart)必须用 fetch,
+ *   而 fetch 拿到的是原始字节流,SSE 的帧结构得自己拆。
+ *   /v9/ai 的「上传图片 + 流式回答」走的就是这条路。
+ * ────────────────────────────────────────────────────────────────────── */
+
+/**
+ * 把一段 SSE 原始文本拆成事件帧
+ *
+ * 一个事件长这样(Spring 的 SseEmitter 写出来的形式,冒号后**没有**空格):
+ *
+ *   event:message
+ *   data:{"v":"分片原文"}
+ *   <空行>
+ *
+ * @param {string} text 一段完整的 SSE 文本(以空行结尾)
+ * @returns {Array<{event: string, data: string}>}
+ */
+export const parseSseFrames = (text) => {
+  const frames = []
+  if (!text) return frames
+
+  // 一个事件以「空行」结束。Spring 写的是 \n\n,标准允许 \r\n\r\n
+  for (const block of text.split(/\r?\n\r?\n/)) {
+    if (!block.trim()) continue
+
+    let event = 'message'
+    const dataLines = []
+
+    for (const line of block.split(/\r?\n/)) {
+      // 空行、注释行(以冒号开头,后端用它发心跳)
+      if (!line || line.startsWith(':')) continue
+
+      const colon = line.indexOf(':')
+      const field = colon === -1 ? line : line.slice(0, colon)
+      let value = colon === -1 ? '' : line.slice(colon + 1)
+
+      // SSE 规范:冒号后**一个**前导空格要去掉。
+      // ⚠️ Spring 写的是 "data:" + 原文(冒号后没有空格),所以这里去掉的那个空格
+      //    只可能是协议允许的那一个,不会误伤正文 ——
+      //    真正会被吃掉的那个空格早就在浏览器/传输层那一环丢掉了,
+      //    后端改用 JSON 信封就是为了绕开它(见本文件开头的说明)。
+      if (value.startsWith(' ')) value = value.slice(1)
+
+      if (field === 'event') event = value
+      else if (field === 'data') dataLines.push(value)
+    }
+
+    // 没有 data 的帧(比如只有 event 名的)没有内容可读,丢掉
+    if (dataLines.length) frames.push({ event, data: dataLines.join('\n') })
+  }
+
+  return frames
+}
+
+/**
+ * 读干一个 SSE 响应流,逐帧回调
+ *
+ * ⚠️ 两个容易踩的坑:
+ *   1. **UTF-8 字符可能跨分片**:一个汉字是 3 字节,网络分片正好切在中间是常事。
+ *      解码必须用 `decode(value, { stream: true })`,否则那半个字会变成乱码。
+ *   2. **帧可能跨分片**:`data:` 的内容还没收全就来了下一个分片 ——
+ *      所以要按「空行」切,不能按「分片」切。
+ *
+ * @param {Response} response fetch 的响应(必须是 text/event-stream)
+ * @param {(frame: {event: string, data: string}) => void} onFrame 每帧回调
+ */
+export const readSseStream = async (response, onFrame) => {
+  if (!response.body) throw new Error('这个浏览器不支持流式读取响应')
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+
+  const drain = (block) => {
+    for (const frame of parseSseFrames(block)) onFrame(frame)
+  }
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+
+      // 只切「已经收到完整分隔符」的部分,剩下的留在 buffer 里等下一片
+      for (;;) {
+        const idx = buffer.search(/\r?\n\r?\n/)
+        if (idx === -1) break
+        const sep = buffer.slice(idx).match(/^\r?\n\r?\n/)[0]
+        const block = buffer.slice(0, idx)
+        buffer = buffer.slice(idx + sep.length)
+        drain(block + sep)
+      }
+    }
+
+    // 收尾:flush 掉解码器里可能还压着的字节
+    buffer += decoder.decode()
+    // 后端异常断开时最后一段可能没有空行结尾,别把它丢了
+    if (buffer.trim()) drain(buffer)
+  } finally {
+    try {
+      reader.releaseLock()
+    } catch {
+      /* 已经释放了就算了 */
+    }
+  }
+}
+
 /**
  * 解析一个 SSE 分片的负载
  *
