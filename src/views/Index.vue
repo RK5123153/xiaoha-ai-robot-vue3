@@ -95,6 +95,21 @@
             />
           </div>
 
+          <!-- 工具开关：勾上的工具才会发给模型（?tools=datetime,amap）
+               只有文字对话有：看图说话那条路(/v9)后端不接工具 -->
+          <div v-if="mode === 'text' && toolList.length" class="tool-bar mb-2">
+            <span class="tool-bar-label">工具</span>
+            <button
+              v-for="t in toolList"
+              :key="t.name"
+              type="button"
+              class="tool-chip"
+              :class="{ 'is-on': selectedTools.includes(t.name) }"
+              :title="t.description"
+              @click="toggleTool(t.name)"
+            >{{ t.label || t.name }}</button>
+          </div>
+
           <!-- 看图说话模式的提示：把「无状态」这件事说在前面，别让用户误以为模型记得上一张图 -->
           <p v-if="mode === 'vision'" class="hint mb-1.5">
             看图说话是「一张图 + 一个问题」的独立问答，不带聊天记忆
@@ -152,7 +167,7 @@ import ImagePicker from '@/components/ImagePicker.vue'
 import ImageChip from '@/components/ImageChip.vue'
 import { parseChunkPayload } from '@/utils/sse.js'
 import { lastRegenerableId, turnIndexOf as turnIndexOfMessage } from '@/utils/chat-turn.js'
-import { API_BASE } from '@/utils/api.js'
+import { chatApi } from '@/utils/api.js'
 import { prepareImage, isImageFile } from '@/utils/image.js'
 import { sendVisionStream, DEFAULT_QUESTION } from '@/utils/vision.js'
 
@@ -164,6 +179,55 @@ const MODES = [
 
 /** 当前模式：text = 文字对话(有记忆) / vision = 看图说话(无状态) */
 const mode = ref('text')
+
+/**
+ * 可用工具 —— 后端 /v2/ai/tools 列出来的
+ *
+ * <p>为什么要这一层:模型自己不知道「今天是几号」,得有个工具替它查
+ * (后端的工具调用能力)。但工具不是全都默认开着 ——
+ * 每个工具的定义都要占 token,而且开多了模型会动不动就调,
+ * 所以由用户按需勾选,勾了才发给模型(?tools=datetime,amap)。
+ *
+ * <p>清单和默认勾选状态**都来自后端**,前端不写死:
+ * 后端加工具 → 前端自动多一个按钮,前端零改动。
+ */
+const toolList = ref([])
+
+/** 勾选中的工具短名 */
+const selectedTools = ref([])
+
+/** 清单拿到了没 —— 没拿到(旧后端 / 网络不通)就不发 tools 参数,走后端默认 */
+const toolsLoaded = ref(false)
+
+/**
+ * 本次请求要带的 tools 参数
+ *
+ * <p>⚠️ 「一个都没勾」和「不传」是两回事:
+ * 不传 = 用后端配置的默认工具(datetime);一个都没勾 = 明确全部关掉(后端认 none)。
+ * 混起来的话,用户把工具全关了却还在用默认工具,就会觉得「关不掉」。
+ */
+const toolsParam = computed(() => {
+  if (!toolsLoaded.value) return ''
+  return selectedTools.value.length ? selectedTools.value.join(',') : 'none'
+})
+
+/** 拉工具清单,默认勾上后端说「默认开启」的那些 */
+const loadTools = async () => {
+  const list = await chatApi.tools()
+  toolList.value = list
+  selectedTools.value = list.filter((t) => t.defaultEnabled).map((t) => t.name)
+  toolsLoaded.value = list.length > 0
+}
+
+/** 勾/取消一个工具 */
+const toggleTool = (name) => {
+  const i = selectedTools.value.indexOf(name)
+  if (i === -1) {
+    selectedTools.value = [...selectedTools.value, name]
+  } else {
+    selectedTools.value = selectedTools.value.filter((n) => n !== name)
+  }
+}
 
 const message = ref('')
 const textareaRef = ref(null)
@@ -311,6 +375,8 @@ onMounted(() => {
   autoResize()
   scrollToBottom(true)
   textareaRef.value?.focus()
+  // 拉工具清单(拉不到也不影响聊天:不传 tools 参数,后端用默认工具)
+  loadTools()
 })
 
 // 聊天记录（默认问候语）
@@ -591,8 +657,14 @@ const startStream = (userMessage, replyIndex) => {
 
   try {
     // 建立 SSE 连接
+    // ⚠️ URL 由接口层拼(utils/api.js):组件里不出现任何后端地址,
+    //    后端换路径/加参数只改那一处。
     eventSource = new EventSource(
-      `${API_BASE}/generateStream?message=${encodeURIComponent(userMessage)}&chatId=${encodeURIComponent(chatId)}`
+      chatApi.streamUrl({
+        message: userMessage,
+        chatId,
+        tools: toolsParam.value,
+      })
     )
     const es = eventSource
 
@@ -836,14 +908,7 @@ const sendVisionMessage = async () => {
  * @returns {Promise<boolean>} 是否成功回滚
  */
 const rollbackLastTurn = async () => {
-  try {
-    const res = await fetch(`${API_BASE}/chats/${encodeURIComponent(chatId)}/last-turn`, {
-      method: 'DELETE',
-    })
-    return res.ok
-  } catch (e) {
-    return false
-  }
+  return chatApi.rollbackLastTurn(chatId)
 }
 
 /**
@@ -944,18 +1009,12 @@ const handleFeedback = (messageId, rating) => {
 
   // 上报后端（接口还没上线时失败也无妨，本地状态照常生效）
   // 取消点赞/点踩暂不上报 —— 后端按「最后一条记录为准」处理
-  fetch(`${API_BASE}/feedback`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      // ⚠️ 看图说话用自己的 chatId：它没有记忆，
-      //    共用一个的话反馈里的 turnIndex 会和文字对话的撞车
-      chatId: isVision ? visionChatId : chatId,
-      turnIndex: turnIndexOf(messageId),
-      rating,
-    }),
-  }).catch(() => {
-    // 后端接口还没上线，忽略
+  chatApi.feedback({
+    // ⚠️ 看图说话用自己的 chatId：它没有记忆，
+    //    共用一个的话反馈里的 turnIndex 会和文字对话的撞车
+    chatId: isVision ? visionChatId : chatId,
+    turnIndex: turnIndexOf(messageId),
+    rating,
   })
 }
 </script>
@@ -992,6 +1051,43 @@ const handleFeedback = (messageId, rating) => {
   color: #262626;
   background: #fff;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+/* ---------- 工具开关 ---------- */
+.tool-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tool-bar-label {
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+/* 未勾选 = 灰底;勾上 = 主色,一眼能看出「这次会带哪些工具」 */
+.tool-chip {
+  padding: 3px 10px;
+  border-radius: 9999px;
+  font-size: 12px;
+  line-height: 18px;
+  color: #6b7280;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.tool-chip:hover {
+  border-color: #4d6bfe;
+  color: #4d6bfe;
+}
+
+.tool-chip.is-on {
+  color: #fff;
+  background: #4d6bfe;
+  border-color: #4d6bfe;
 }
 
 /* ---------- 看图说话 ---------- */

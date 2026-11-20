@@ -11,7 +11,8 @@
  * 所以策略是：**后端优先，拿不到就悄悄退回浏览器**，用户无感。
  * 后端没开时接口返回 501，正好触发退回 —— 不用在前端配开关跟着后端改。
  *
- * 后端接口：POST {API_BASE}/speech  body {"text":"要念的纯文本"}  → audio/mpeg
+ * 后端接口：POST {CHAT_BASE}/speech  body {"text":"要念的纯文本"}  → audio/mpeg
+ * （地址在 utils/api.js 的 ttsApi 里，本文件不拼 URL）
  * ⚠️ 必须先剥掉 Markdown（`toPlainText`），别把 ``` 和 ** 一起送过去。
  *
  * 用后端 TTS 顺带解决了一个浏览器 TTS 的老 bug：
@@ -20,7 +21,7 @@
  */
 
 import { speakText, speechSupported, stopSpeaking } from './speech.js'
-import { API_BASE } from './api.js'
+import { ttsApi } from './api.js'
 
 /**
  * 总开关：设成 false 就一直用浏览器内置 TTS，一个请求都不发。
@@ -101,28 +102,14 @@ export const stopTts = () => {
 /**
  * 请求后端合成一段 mp3
  *
+ * 具体的「往哪个地址发」在 utils/api.js 里(接口层),这里只管调用。
+ *
  * @param {string} text 纯文本
  * @param {AbortSignal} [signal]
  * @returns {Promise<Blob>}
  */
 const requestSpeech = async (text, signal) => {
-  const res = await fetch(`${API_BASE}/speech`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text }),
-    signal,
-  })
-  if (!res.ok) {
-    // 501 = 后端没开 TTS（app.tts.enabled=false）→ 上层据此退回浏览器 TTS
-    const err = new Error(`后端语音接口返回 ${res.status}`)
-    err.status = res.status
-    throw err
-  }
-  const type = res.headers.get('content-type') || ''
-  if (!type.includes('audio')) {
-    throw new Error('后端语音接口没返回音频')
-  }
-  return res.blob()
+  return ttsApi.synthesize(text, signal)
 }
 
 /**

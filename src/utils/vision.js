@@ -22,38 +22,11 @@
  *   event: error    → 模型没吐出正文时补发,data 是中文原因
  */
 
-import { MULTIMODAL_API_BASE } from './api.js'
+import { readErrorMessage, visionApi } from './api.js'
 import { parseChunkPayload, readSseStream } from './sse.js'
 
 /** 用户什么都没说时的默认问题(后端也有一份,但这里自己给更可控) */
 export const DEFAULT_QUESTION = '请描述一下这张图片'
-
-/**
- * 从一个失败的响应里挖出「能给人看」的原因
- *
- * 后端把原因放在响应的 JSON 里(Spring 默认错误体的 `message` 字段):
- *   {"timestamp":"...","status":400,"error":"Bad Request","message":"provider 'bailian' 不在多模态白名单里 ...","path":"/v9/ai/generateStream"}
- *
- * ⚠️ 生产环境后端把 `include-message` 关成了 `never`,那时响应体里没有 `message`,
- *    只能退回状态码 —— 所以兜底文案里要带上状态码。
- *
- * @param {Response} res
- * @returns {Promise<string>}
- */
-export const readErrorMessage = async (res) => {
-  let detail = ''
-  try {
-    const data = await res.json()
-    // ⚠️ 只取 `message`,不要拿 `error` 兜底 ——
-    //    Spring 默认错误体里的 `error` 是 HTTP 的标准原因短语("Bad Request"、
-    //    "Service Unavailable"),对用户毫无信息量,还把真正有用的状态码挤掉了。
-    detail = data?.message || ''
-  } catch {
-    // 不是 JSON(网关的 HTML 错误页之类)→ 用状态码兜底
-  }
-  if (detail) return detail
-  return `请求失败(HTTP ${res.status}${res.statusText ? ' ' + res.statusText : ''})`
-}
 
 /**
  * 问一次「这张图里是什么」
@@ -78,16 +51,11 @@ export const sendVisionStream = async ({
   onThinking,
   onServerError,
 }) => {
-  const form = new FormData()
-  form.append('file', file, file.name)
-  form.append('message', message || DEFAULT_QUESTION)
-  if (model) form.append('model', model)
-
-  const res = await fetch(`${MULTIMODAL_API_BASE}/generateStream`, {
-    method: 'POST',
-    // ⚠️ 千万别手写 Content-Type —— 少了 boundary 浏览器根本发不出去,
-    //    后端会收到一个解析不了的 multipart 体(报 400,但原因跟图片没关系)。
-    body: form,
+  // 请求本身交给接口层(它知道往哪个地址发);这里只管「读流」
+  const res = await visionApi.submit({
+    file,
+    message: message || DEFAULT_QUESTION,
+    model,
     signal,
   })
 
