@@ -316,6 +316,62 @@ const normalizeText = (text) => {
     .join('')
 }
 
+/**
+ * 修复「加粗/斜体的起始标记紧跟标点」导致解析失败的问题
+ *
+ * 背景：CommonMark 规定，强调标记要能当「开始符」必须满足 left-flanking：
+ *   后面不是空白，并且（后面不是标点，或者前面是空白/行首）。
+ * 模型很爱写成这样：
+ *   有,但**"文章配图"不像 PDF/DOCX 那样有官方现成 Skill**,它通常……
+ *   ↑ 开标记 ** 紧跟一个引号 → 不满足 left-flanking → ** 不能开强调
+ * 现象：页面上出现**裸的星号和引号**，而且加粗也没了。
+ *
+ * 修法：把紧跟在开标记后面的标点挪到标记前面
+ *   但**"文章配图"不像…**  →  但"**文章配图"不像…**
+ * 挪完之后开标记后面不再是标点，left-flanking 成立，加粗正常渲染。
+ *
+ * ⚠️ 为什么不用「塞零宽字符」的方案（`**` 后插 U+200B）：
+ *   那样确实也能解析，但会在正文里留下不可见字符 —— 用户复制文本时会带上它，
+ *   搜索/比对也会受影响。挪标点不引入任何额外字符。
+ *
+ * ⚠️ 只修「开」标记：同一行里 ** 的第 1、3、5… 次出现是开，第 2、4… 次是闭。
+ *   闭标记后面跟标点（**加粗**。）是合法的，动它反而会改变语义。
+ *   按行计数而不是按整段：模型极少跨行写强调，跨行会让奇偶算错。
+ */
+const repairEmphasis = (src) => {
+  if (!src || !src.includes('*')) return src
+  return src.split('\n').map(repairEmphasisLine).join('\n')
+}
+
+/** 紧跟在强调标记后面、会让它开不了强调的标点（Unicode 标点 + 符号，取超集更安全） */
+const PUNCT_AFTER_EM = /[\p{P}\p{S}]/u
+
+/** 修一行的强调标记 */
+const repairEmphasisLine = (line) => {
+  const delims = []
+  const re = /\*\*|\*/g
+  let m
+  while ((m = re.exec(line)) !== null) {
+    delims.push({ text: m[0], start: m.index, end: m.index + m[0].length })
+  }
+  if (!delims.length) return line
+
+  // 按类型分别计数：** 和 * 各算各的（第 1、3、5… 次是开）
+  const seen = { '**': 0, '*': 0 }
+  let out = ''
+  let pos = 0
+  for (const d of delims) {
+    seen[d.text] += 1
+    const opening = seen[d.text] % 2 === 1
+    const next = line[d.end]
+    if (!opening || !next || !PUNCT_AFTER_EM.test(next)) continue
+    // 把标点挪到标记前面：标点被"吃掉"，所以 pos 要跳过它
+    out += line.slice(pos, d.start) + next + d.text
+    pos = d.end + 1
+  }
+  return out + line.slice(pos)
+}
+
 // 规范化单个文本段(不含代码块)
 const normalizeSegment = (s) => {
   // 行首标题标记后补空格:###xxx → ### xxx
@@ -349,6 +405,9 @@ const normalizeSegment = (s) => {
   // 中英文之间补空格(仅在缺失时补,已有空格的不受影响)
   s = s.replace(/([一-龥])([A-Za-z0-9])/g, '$1 $2')
   s = s.replace(/([A-Za-z0-9])([一-龥])/g, '$1 $2')
+
+  // 最后修「强调标记紧跟标点」导致的解析失败(见 repairEmphasis 的注释)
+  s = repairEmphasis(s)
 
   return s
 }
