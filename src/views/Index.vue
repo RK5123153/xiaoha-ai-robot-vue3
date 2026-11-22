@@ -96,9 +96,10 @@
           </div>
 
           <!-- 工具开关：勾上的工具才会发给模型（?tools=datetime,amap）
-               只有文字对话有：看图说话那条路(/v9)后端不接工具 -->
+               只有文字对话有：看图说话那条路(/v9)后端不接工具
+               ⚠️ 没勾的工具 AI 根本看不到 —— 它会直接说「我没有联网搜索的能力」 -->
           <div v-if="mode === 'text' && toolList.length" class="tool-bar mb-2">
-            <span class="tool-bar-label">工具</span>
+            <span class="tool-bar-label" title="勾上的工具会交给 AI 调用(联网搜索、查天气、查 QQ 信息…)">工具</span>
             <button
               v-for="t in toolList"
               :key="t.name"
@@ -200,6 +201,15 @@ const selectedTools = ref([])
 const toolsLoaded = ref(false)
 
 /**
+ * 勾选状态存在 localStorage 里 —— **刷新/换标签页都不能丢**
+ *
+ * <p>为什么必须存:工具没勾上 = 模型压根看不到这个工具,会直接说
+ * 「我没有联网搜索 GitHub 的能力」然后凭记忆瞎答(用户就是这么发现的)。
+ * 而勾选一次就刷新页面没了,等于每次都要重新勾 —— 谁记得住。
+ */
+const TOOLS_STORAGE_KEY = 'xiaoha-ai-robot.tools'
+
+/**
  * 本次请求要带的 tools 参数
  *
  * <p>⚠️ 「一个都没勾」和「不传」是两回事:
@@ -211,21 +221,39 @@ const toolsParam = computed(() => {
   return selectedTools.value.length ? selectedTools.value.join(',') : 'none'
 })
 
-/** 拉工具清单,默认勾上后端说「默认开启」的那些 */
+/** 拉工具清单:优先用上次勾选的,没有才用后端说的「默认开启」 */
 const loadTools = async () => {
   const list = await chatApi.tools()
   toolList.value = list
-  selectedTools.value = list.filter((t) => t.defaultEnabled).map((t) => t.name)
+
+  let saved = null
+  try {
+    saved = JSON.parse(localStorage.getItem(TOOLS_STORAGE_KEY) || 'null')
+  } catch {
+    saved = null // 存坏了(手动改过)→ 当作没有,走默认
+  }
+  const known = new Set(list.map((t) => t.name))
+  if (Array.isArray(saved)) {
+    // 只保留后端还认识的工具(后端升级后可能删了某个工具)
+    selectedTools.value = saved.filter((n) => known.has(n))
+  } else {
+    selectedTools.value = list.filter((t) => t.defaultEnabled).map((t) => t.name)
+  }
   toolsLoaded.value = list.length > 0
 }
 
-/** 勾/取消一个工具 */
+/** 勾/取消一个工具(并记住) */
 const toggleTool = (name) => {
   const i = selectedTools.value.indexOf(name)
   if (i === -1) {
     selectedTools.value = [...selectedTools.value, name]
   } else {
     selectedTools.value = selectedTools.value.filter((n) => n !== name)
+  }
+  try {
+    localStorage.setItem(TOOLS_STORAGE_KEY, JSON.stringify(selectedTools.value))
+  } catch {
+    // 隐私模式下 localStorage 可能不可写 → 忽略,只是这次不记住而已
   }
 }
 
