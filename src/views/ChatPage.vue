@@ -51,7 +51,7 @@
           <!-- 头像 -->
           <div class="flex-shrink-0 mr-3">
             <div class="w-8 h-8 rounded-full flex items-center justify-center border border-gray-200">
-              <SvgIcon name="deepseek-logo" customCss="w-5 h-5"></SvgIcon>
+              <BrandLogo class="w-5 h-5" />
             </div>
           </div>
           <!-- 回复的内容（Markdown 渲染） -->
@@ -158,7 +158,7 @@
             title="发送（Enter）"
             class="flex items-center justify-center bg-[#4d6bfe] text-white rounded-full w-8 h-8 border border-[#4d6bfe] hover:bg-[#3b5bef] transition-colors
                    disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-[#4d6bfe]">
-            <SvgIcon name="up-arrow" customCss="w-5 h-5"></SvgIcon>
+            <ArrowUpOutlined class="text-xl" />
           </button>
         </div>
       </div>
@@ -166,8 +166,7 @@
       </div>
     </div>
 
-    <!-- 轻提示：接口未就绪之类的临时状态，3 秒后自动消失 -->
-    <div v-if="toast" class="toast">{{ toast }}</div>
+    <!-- 轻提示用 antd 的 message(见 App.vue 的 message.config) -->
 
     <!-- 图片放大预览：点遮罩或按 Esc 关闭 -->
     <div v-if="previewUrl" class="preview-overlay" @click="previewUrl = ''">
@@ -179,9 +178,11 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import SvgIcon from '@/components/SvgIcon.vue'
+// 这里起别名:页面里已经有叫 message 的变量(输入框的草稿)
+import { message as antMessage } from 'ant-design-vue'
 import StreamMarkdownRender from '@/components/StreamMarkdownRender.vue'
 import MessageActions from '@/components/MessageActions.vue'
+import BrandLogo from '@/components/BrandLogo.vue'
 import ImagePicker from '@/components/ImagePicker.vue'
 import ImageChip from '@/components/ImageChip.vue'
 import { parseChunkPayload, readSseStream } from '@/utils/sse.js'
@@ -309,15 +310,6 @@ const chatScrollRef = ref(null)
 const isSending = ref(false)
 
 /** 轻提示文案（空字符串 = 不显示） */
-const toast = ref('')
-let toastTimer = null
-const showToast = (text) => {
-  toast.value = text
-  clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => {
-    toast.value = ''
-  }, 3000)
-}
 
 /** 生成消息 id */
 const genId = () =>
@@ -920,7 +912,7 @@ const regenerateText = async (idx) => {
     // 1. 先回滚记忆（见 rollbackLastTurn 的说明）
     const rolled = await rollbackLastTurn()
     if (!rolled) {
-      showToast('回滚最后一轮失败，暂时不能重新生成')
+      antMessage.info('回滚最后一轮失败，暂时不能重新生成')
       isSending.value = false
       return
     }
@@ -937,7 +929,7 @@ const regenerateText = async (idx) => {
     await startStream(question.content, idx)
   } catch (e) {
     console.error('重新生成失败: ', e)
-    showToast('重新生成失败，请稍后重试')
+    antMessage.info('重新生成失败，请稍后重试')
     isSending.value = false
   }
 }
@@ -1073,7 +1065,7 @@ const onPickImage = async (file) => {
     if (old) releaseObjectUrl(old.previewUrl)
   } catch (e) {
     console.error('图片处理失败: ', e)
-    showToast(e.message || '这个文件不能当图片用')
+    antMessage.info(e.message || '这个文件不能当图片用')
   } finally {
     preparingImage.value = false
   }
@@ -1119,7 +1111,7 @@ const onDrop = (e) => {
       return
     }
   }
-  showToast('只能把图片拖进来')
+  antMessage.info('只能把图片拖进来')
 }
 
 /**
@@ -1365,23 +1357,6 @@ watch(
   cursor: default;
 }
 
-/* ---------- 轻提示 ---------- */
-.toast {
-  position: fixed;
-  left: 50%;
-  /* 落在输入框上方一点，别把「发送」按钮挡住 */
-  bottom: 108px;
-  transform: translateX(-50%);
-  z-index: 50;
-  max-width: 80vw;
-  padding: 8px 16px;
-  border-radius: 8px;
-  background: rgba(31, 41, 55, 0.92);
-  color: #fff;
-  font-size: 13px;
-  line-height: 1.5;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
-}
 
 /* ---------- 聊天区滚动条：颜色淡一点，不抢正文视线 ---------- */
 .chat-scroll {

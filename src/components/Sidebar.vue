@@ -33,17 +33,21 @@
       内层定宽 + 外层 overflow-hidden,才是「滑进去」的效果。
     -->
     <div class="w-64 h-full flex flex-col bg-[#f9fbff] border-r border-gray-200">
-      <!-- 顶部:logo + 关闭(仅移动端) -->
-      <div class="h-12 shrink-0 flex items-center gap-2 px-4">
-        <SvgIcon name="deepseek-logo" customCss="w-6 h-6" />
-        <span class="font-semibold text-[15px]">小哈 AI</span>
+      <!-- 顶部:logo + 应用名 + 关闭(仅移动端) -->
+      <div class="h-14 shrink-0 relative flex items-center justify-center gap-2 px-4">
+        <BrandLogo class="w-7 h-7" />
+        <span class="font-semibold text-[15px] tracking-wide text-gray-800">小哈 AI</span>
+        <!--
+          关闭按钮绝对定位到右上角,而不是用 ml-auto 撑开 ——
+          logo 那一组要**居中**,用 ml-auto 的话会被按钮推得偏左。
+        -->
         <button
           type="button"
-          class="ml-auto md:hidden p-1.5 rounded-md text-gray-400 hover:bg-gray-200 hover:text-gray-700"
+          class="absolute right-2 md:hidden p-1.5 rounded-md text-gray-400 hover:bg-gray-200 hover:text-gray-700"
           aria-label="关闭侧边栏"
           @click="$emit('close')"
         >
-          <SvgIcon name="close" customCss="w-4 h-4" />
+          <CloseOutlined class="text-base" />
         </button>
       </div>
 
@@ -51,12 +55,11 @@
       <div class="px-3 pb-3 shrink-0">
         <button
           type="button"
-          class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm
-                 bg-white border border-gray-200 text-gray-700
-                 hover:border-[#4d6bfe] hover:text-[#4d6bfe] transition-colors"
+          class="mx-auto w-fit flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm
+                 new-chat-btn transition-colors cursor-pointer"
           @click="goHome"
         >
-          <SvgIcon name="plus" customCss="w-4 h-4" />
+          <PlusOutlined class="text-base" />
           新对话
         </button>
       </div>
@@ -132,8 +135,8 @@
 <script setup>
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import SvgIcon from '@/components/SvgIcon.vue'
 import ChatListItem from '@/components/ChatListItem.vue'
+import BrandLogo from '@/components/BrandLogo.vue'
 import {
   chatState,
   modelState,
@@ -230,6 +233,27 @@ const doDelete = async (uuid) => {
 </script>
 
 <style scoped>
+/*
+  「新对话」按钮:浅蓝底 + 品牌色字。
+  颜色写在这儿而不是用 Tailwind 任意值类,
+  是因为 hover 态要的是**另一个**浅一档的蓝,
+  两个颜色成对出现,放一起更好维护。
+*/
+.new-chat-btn {
+  background-color: rgb(219 234 254);
+  color: #4d6bfe;
+}
+
+.new-chat-btn:hover {
+  background-color: #c6dcf8;
+}
+
+/* 键盘 Tab 过去时要有可见的焦点圈(鼠标点击不显示) */
+.new-chat-btn:focus-visible {
+  outline: 2px solid #4d6bfe;
+  outline-offset: 2px;
+}
+
 /* 侧边栏滚动条:颜色淡一点,不抢会话标题的视线 */
 .chat-scroll {
   scrollbar-width: thin;

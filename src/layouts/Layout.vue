@@ -17,28 +17,38 @@
       ⚠️ 移动端不显示:那边侧边栏本来就是抽屉,由顶栏的汉堡按钮管,
          再挂一个浮动按钮会挡住内容、还多出一个同功能的入口。
     -->
-    <button
-      type="button"
-      class="hidden md:flex items-center justify-center fixed top-4 z-30
-             bg-white border border-gray-200 p-2
-             transition-[left] duration-300 ease-in-out"
-      :class="collapsed ? 'left-0 rounded-lg' : 'left-64 rounded-r-lg'"
-      :title="collapsed ? '展开侧边栏' : '收起侧边栏'"
-      :aria-label="collapsed ? '展开侧边栏' : '收起侧边栏'"
-      :aria-expanded="!collapsed"
-      @click="toggleCollapsed"
-    >
-      <SvgIcon
-        :name="collapsed ? 'sidebar-close' : 'sidebar-open'"
-        :customCss="collapsed ? 'w-7 h-7 text-gray-400' : 'w-6 h-6 text-gray-400'"
-      />
-      <!--
-        ⚠️ 两个图标的 viewBox 里留白不一样:
-        sidebar-close 的图形在 1024 的画布里缩了一圈,同样 w-6 h-6 渲染出来
-        看着比 sidebar-open 小一圈(实测 21.5px vs 24px)。
-        所以收起时给大一号(w-7),两个状态看着才一样大。
-      -->
-    </button>
+    <!--
+      悬停提示用 antd 的 <a-tooltip>,不用原生 title:
+      原生 title 要悬停 1 秒才弹,样式还是浏览器自带的灰方块。
+      ⚠️ 别再给这个按钮加原生 title —— title 和 a-tooltip 会**弹两次**。
+      统一到 antd 而不是各写各的 CSS:以后再引入 Dropdown / Modal,
+      弹层避让、延迟、读屏这些细节都是现成的,不必每处自己写一遍。
+    -->
+    <a-tooltip placement="bottom">
+      <template #title>
+        <span>{{ collapsed ? '展开侧边栏' : '收起侧边栏' }}</span>
+      </template>
+      <button
+        type="button"
+        class="hidden md:flex items-center justify-center fixed top-4 z-30
+               bg-white border border-gray-200 p-2
+               transition-[left] duration-300 ease-in-out"
+        :class="collapsed ? 'left-0 rounded-lg' : 'left-64 rounded-r-lg'"
+        :aria-label="collapsed ? '展开侧边栏' : '收起侧边栏'"
+        :aria-expanded="!collapsed"
+        @click="toggleCollapsed"
+      >
+        <!-- 收起 / 展开:antd 里对应 MenuFold / MenuUnfold -->
+        <MenuFoldOutlined v-if="collapsed" class="text-xl text-gray-400" />
+        <MenuUnfoldOutlined v-else class="text-xl text-gray-400" />
+        <!--
+          ⚠️ 两个图标的 viewBox 里留白不一样:
+          sidebar-close 的图形在 1024 的画布里缩了一圈,同样 w-6 h-6 渲染出来
+          看着比 sidebar-open 小一圈(实测 21.5px vs 24px)。
+          所以收起时给大一号(w-7),两个状态看着才一样大。
+        -->
+      </button>
+    </a-tooltip>
 
     <!-- ─────────────── 主内容区 ─────────────── -->
     <main class="flex-1 min-w-0 flex flex-col">
@@ -50,7 +60,7 @@
           aria-label="打开侧边栏"
           @click="drawerOpen = true"
         >
-          <SvgIcon name="menu" customCss="w-5 h-5" />
+          <MenuOutlined class="text-xl" />
         </button>
         <span class="text-sm font-medium text-gray-700">小哈 AI</span>
       </div>
@@ -64,7 +74,6 @@
 <script setup>
 import { ref, watch, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
-import SvgIcon from '@/components/SvgIcon.vue'
 import Sidebar from '@/components/Sidebar.vue'
 import { chatState, loadChats, loadModels } from '@/utils/chat-store.js'
 

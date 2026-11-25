@@ -55,7 +55,7 @@
           stroke-dasharray="40 16.5"
         />
       </svg>
-      <SvgIcon v-else name="speaker" customCss="w-[17px] h-[17px]"></SvgIcon>
+      <SoundOutlined v-else class="text-[17px]" />
     </button>
 
     <!-- 复制 -->
@@ -67,7 +67,7 @@
       :aria-label="copied ? '已复制' : '复制'"
       @click="handleCopy"
     >
-      <SvgIcon :name="copied ? 'check' : 'copy'" customCss="w-[17px] h-[17px]"></SvgIcon>
+      <CheckOutlined v-if="copied" class="text-[17px]" /><CopyOutlined v-else class="text-[17px]" />
     </button>
 
     <!-- 重新生成：问候语没有对应的提问，直接不显示这个按钮 -->
@@ -80,7 +80,7 @@
       aria-label="重新生成"
       @click="$emit('regenerate')"
     >
-      <SvgIcon name="refresh" customCss="w-[17px] h-[17px]"></SvgIcon>
+      <ReloadOutlined class="text-[17px]" />
     </button>
 
     <!-- 点赞 -->
@@ -92,7 +92,7 @@
       :aria-label="feedback === 'up' ? '取消点赞' : '点赞'"
       @click="emitFeedback('up')"
     >
-      <SvgIcon :name="feedback === 'up' ? 'thumb-up-fill' : 'thumb-up'" customCss="w-[17px] h-[17px]"></SvgIcon>
+      <LikeFilled v-if="feedback === 'up'" class="text-[17px]" /><LikeOutlined v-else class="text-[17px]" />
     </button>
 
     <!-- 点踩 -->
@@ -104,14 +104,13 @@
       :aria-label="feedback === 'down' ? '取消点踩' : '点踩'"
       @click="emitFeedback('down')"
     >
-      <SvgIcon :name="feedback === 'down' ? 'thumb-down-fill' : 'thumb-down'" customCss="w-[17px] h-[17px]"></SvgIcon>
+      <DislikeFilled v-if="feedback === 'down'" class="text-[17px]" /><DislikeOutlined v-else class="text-[17px]" />
     </button>
   </div>
 </template>
 
 <script setup>
 import { computed, onBeforeUnmount, ref } from 'vue'
-import SvgIcon from '@/components/SvgIcon.vue'
 import { copyText } from '@/utils/clipboard.js'
 import { toPlainText } from '@/utils/plain-text.js'
 import { speechSupported } from '@/utils/speech.js'

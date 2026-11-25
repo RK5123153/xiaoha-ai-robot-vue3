@@ -6,8 +6,6 @@ import vueDevTools from "vite-plugin-vue-devtools";
 import tailwindcss from "@tailwindcss/vite";
 import Components from "unplugin-vue-components/vite";
 import { AntDesignVueResolver } from "unplugin-vue-components/resolvers";
-import { createSvgIconsPlugin } from "vite-plugin-svg-icons";
-import path from "path";
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -19,26 +17,11 @@ export default defineConfig({
       resolvers: [
         AntDesignVueResolver({
           importStyle: false, // css in js
+          // 图标也走 antd 的官方包:<EllipsisOutlined /> 这种直接写就能用,
+          // 不用自己画 SVG、也不用维护一份 sprite
+          resolveIcons: true,
         }),
       ],
-    }),
-    createSvgIconsPlugin({
-      // 指定项目中存放 SVG 图标的目录路径（插件会扫描此目录下的所有 .svg 文件）
-      iconDirs: [path.resolve(process.cwd(), "src/assets/icons")],
-      // 定义生成的 <symbol> 元素的 id 属性的命名格式
-      // 注：与 src/components/SvgIcon.vue 中 symbolId 计算逻辑保持一致
-      symbolId: "icon-[name]",
-
-      /**
-       * 自定义 SVG Sprite 的插入位置
-       * @default: body-last
-       */
-      inject: "body-last",
-      /**
-       * 自定义 dom id
-       * @default: __svg__icons__dom__
-       */
-      customDomId: "__svg__icons__dom__",
     }),
   ],
   resolve: {

@@ -18,25 +18,52 @@
       v-else
       type="button"
       class="w-full text-left px-3 py-2 pr-12 rounded-lg text-sm truncate transition-colors"
-      :class="active ? 'bg-gray-200 text-gray-900 font-medium' : 'text-gray-600 hover:bg-gray-100'"
+      :class="active ? 'bg-[#eef6ff] text-[#4d6bfe] font-medium' : 'text-gray-600 hover:bg-[#eef6ff] hover:text-gray-900'"
       :title="chat.title"
       @click="$emit('select', chat.uuid)"
     >
       {{ chat.title }}
     </button>
 
-    <!-- 改名 / 删除(悬停才出现) -->
-    <div
-      v-if="!editing"
-      class="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-0.5
-             opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity"
-    >
-      <button type="button" class="side-btn" title="改名" @click.stop="startEdit">
-        <SvgIcon name="edit" customCss="w-3.5 h-3.5" />
-      </button>
-      <button type="button" class="side-btn hover:text-red-500" title="删除" @click.stop="confirming = true">
-        <SvgIcon name="trash" customCss="w-3.5 h-3.5" />
-      </button>
+    <!--
+      更多操作:一个「⋯」按钮 + 下拉菜单(重命名 / 删除)
+      ⚠️ 原来摆的是两个图标按钮(铅笔 / 垃圾桶):
+      一是挤(标题右边只剩 48px),二是以后再加「导出 / 复制」就没地方放。
+      收成一个「⋯」之后,加操作项只要往菜单里加一行,不用改标题的 padding。
+    -->
+    <div v-if="!editing" class="absolute right-1.5 top-1/2 -translate-y-1/2 z-10">
+      <a-dropdown v-model:open="menuOpen" trigger="click" placement="bottomRight">
+        <template #overlay>
+          <a-menu @click="onMenuClick">
+            <!--
+              ⚠️ 图标外面要套一层 inline-flex:
+              Tailwind v4 的 preflight 把 svg 设成了 display:block,
+              不套的话图标和文字会**上下两行**(不是左右并排)。
+            -->
+            <a-menu-item key="rename">
+              <span class="inline-flex items-center"><EditOutlined class="text-base" /></span>
+              重命名
+            </a-menu-item>
+            <a-menu-item key="delete" danger>
+              <span class="inline-flex items-center"><DeleteOutlined class="text-base" /></span>
+              删除
+            </a-menu-item>
+          </a-menu>
+        </template>
+        <button
+          type="button"
+          class="more-btn"
+          :class="
+            menuOpen
+              ? 'opacity-100'
+              : 'opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto focus-visible:opacity-100 focus-visible:pointer-events-auto'
+          "
+          aria-label="更多操作"
+          aria-haspopup="menu"
+        >
+          <EllipsisOutlined class="text-base" />
+        </button>
+      </a-dropdown>
     </div>
 
     <!-- 删除确认:盖在标题上,不弹原生 confirm(那个丑且阻塞) -->
@@ -55,7 +82,6 @@
 
 <script setup>
 import { ref, nextTick, watch } from 'vue'
-import SvgIcon from '@/components/SvgIcon.vue'
 
 /**
  * 侧边栏里的一个会话
@@ -78,10 +104,40 @@ const editing = ref(false)
 const draft = ref('')
 /** 正在确认删除 */
 const confirming = ref(false)
+/** 下拉菜单是不是开着(开着的时候「⋯」按钮要一直显示) */
+const menuOpen = ref(false)
 const inputRef = ref(null)
+
+/**
+ * 点菜单项:按 key 分发
+ *
+ * <p>用菜单的 key 而不是给每个菜单项单独绑事件 ——
+ *    antd 的 MenuItem 点击会冒泡到 Menu,key 是唯一标识。
+ */
+const onMenuClick = ({ key }) => {
+  // ⚠️ 先把「菜单开着」这个状态收掉,再干活。
+  //    点「重命名」会让整块下拉(含按钮)被 v-if 拆掉,
+  //    antd 那边的「关闭」事件就传不回来了 → menuOpen 停在 true,
+  //    这一行回到正常态时菜单会**自己弹开**(实测踩过)。
+  menuOpen.value = false
+  if (key === 'rename') startEdit()
+  else if (key === 'delete') askDelete()
+}
+
+/**
+ * 点了菜单里的「删除」
+ *
+ * <p>不直接删,先在行内弹确认框 —— 删会话不可撤销,
+ *    一步到位的手滑就真没了(仓库里有过一次误删的记录)。
+ */
+const askDelete = () => {
+  confirming.value = true
+}
 
 /** 开始改名:把原标题搬进输入框,并自动全选(直接打字就能覆盖) */
 const startEdit = () => {
+  // 下拉马上要被拆掉,「开着」这个状态得先收(见 onMenuClick 的说明)
+  menuOpen.value = false
   draft.value = props.chat.title
   editing.value = true
   nextTick(() => {
@@ -94,6 +150,7 @@ const startEdit = () => {
 const cancel = () => {
   editing.value = false
   draft.value = ''
+  menuOpen.value = false
 }
 
 /**
@@ -107,6 +164,7 @@ const commit = () => {
   const summary = draft.value.trim()
   editing.value = false
   draft.value = ''
+  menuOpen.value = false
   // 标题没变(或者被清空)→ 不用发请求
   if (!summary || summary === props.chat.title) return
   emit('rename', props.chat.id, summary)
@@ -124,23 +182,25 @@ watch(
   () => {
     editing.value = false
     confirming.value = false
+    menuOpen.value = false
   }
 )
 </script>
 
 <style scoped>
-.side-btn {
+/* 「⋯」按钮:默认透明,悬停才有个浅底 */
+.more-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 4px;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
   color: #9ca3af;
-  transition: color 0.15s ease, background-color 0.15s ease;
+  transition: color 0.15s ease, background-color 0.15s ease, opacity 0.15s ease;
 }
 
-.side-btn:hover {
+.more-btn:hover {
   color: #4d6bfe;
   background-color: rgba(0, 0, 0, 0.06);
 }

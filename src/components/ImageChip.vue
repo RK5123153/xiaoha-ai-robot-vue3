@@ -27,13 +27,12 @@
       aria-label="移除图片"
       @click="$emit('remove')"
     >
-      <SvgIcon name="close" customCss="w-3.5 h-3.5"></SvgIcon>
+      <CloseOutlined class="text-[14px]" />
     </button>
   </div>
 </template>
 
 <script setup>
-import SvgIcon from '@/components/SvgIcon.vue'
 import { formatBytes } from '@/utils/image.js'
 
 defineProps({

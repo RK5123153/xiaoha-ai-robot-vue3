@@ -5,7 +5,7 @@
       <div class="w-full max-w-2xl">
         <div class="flex items-center gap-3">
           <div class="w-11 h-11 rounded-full flex items-center justify-center border border-gray-200 shrink-0">
-            <SvgIcon name="deepseek-logo" customCss="w-6 h-6"></SvgIcon>
+            <BrandLogo class="w-6 h-6" />
           </div>
           <div>
             <h1 class="text-xl sm:text-2xl font-semibold text-gray-900">你好，我是小哈 AI 助手 ✨</h1>
@@ -79,7 +79,7 @@
                      border border-[#4d6bfe] hover:bg-[#3b5bef] transition-colors
                      disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-[#4d6bfe]"
             >
-              <SvgIcon name="up-arrow" customCss="w-5 h-5"></SvgIcon>
+              <ArrowUpOutlined class="text-xl" />
             </button>
           </div>
         </div>
@@ -87,8 +87,7 @@
       </div>
     </div>
 
-    <!-- 轻提示 -->
-    <div v-if="toast" class="toast">{{ toast }}</div>
+    <!-- 轻提示用 antd 的 message(见 App.vue 的 message.config) -->
 
     <!-- 图片放大预览 -->
     <div v-if="previewUrl" class="preview-overlay" @click="previewUrl = ''">
@@ -100,7 +99,9 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import SvgIcon from '@/components/SvgIcon.vue'
+// 这里起别名:页面里已经有叫 message 的变量(输入框的草稿)
+import { message as antMessage } from 'ant-design-vue'
+import BrandLogo from '@/components/BrandLogo.vue'
 import ImagePicker from '@/components/ImagePicker.vue'
 import ImageChip from '@/components/ImageChip.vue'
 import { conversationApi } from '@/utils/api.js'
@@ -128,15 +129,6 @@ const previewUrl = ref('')
 const sending = ref(false)
 
 /** 轻提示文案（空字符串 = 不显示） */
-const toast = ref('')
-let toastTimer = null
-const showToast = (text) => {
-  toast.value = text
-  clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => {
-    toast.value = ''
-  }, 3000)
-}
 
 /** 输入框最大高度（px）。超过就在输入框内部滚动，不把整个页面挤爆 */
 const MAX_INPUT_HEIGHT = 300
@@ -232,7 +224,7 @@ const onPickImage = async (file) => {
     if (old) releaseObjectUrl(old.previewUrl)
   } catch (e) {
     console.error('图片处理失败: ', e)
-    showToast(e.message || '这个文件不能当图片用')
+    antMessage.info(e.message || '这个文件不能当图片用')
   } finally {
     preparingImage.value = false
   }
@@ -269,7 +261,7 @@ const onDrop = (e) => {
       return
     }
   }
-  showToast('只能把图片拖进来')
+  antMessage.info('只能把图片拖进来')
 }
 
 /** 粘贴图片（截图工具 / 右键复制图片） */
@@ -398,20 +390,4 @@ const send = async () => {
   cursor: default;
 }
 
-/* 轻提示 */
-.toast {
-  position: fixed;
-  left: 50%;
-  bottom: 108px;
-  transform: translateX(-50%);
-  z-index: 50;
-  max-width: 80vw;
-  padding: 8px 16px;
-  border-radius: 8px;
-  background: rgba(31, 41, 55, 0.92);
-  color: #fff;
-  font-size: 13px;
-  line-height: 1.5;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
-}
 </style>

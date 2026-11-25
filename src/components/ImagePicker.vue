@@ -13,7 +13,7 @@
     aria-label="添加图片"
     @click="openPicker"
   >
-    <SvgIcon name="image" customCss="w-4 h-4"></SvgIcon>
+    <PictureOutlined class="text-base" />
     <span class="text-xs">图片</span>
   </button>
 
@@ -32,7 +32,6 @@
 
 <script setup>
 import { ref } from 'vue'
-import SvgIcon from '@/components/SvgIcon.vue'
 
 const props = defineProps({
   /** 正在发送 / 处理图片时禁用 */
