@@ -11,6 +11,7 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    ChatListItem: typeof import('./src/components/ChatListItem.vue')['default']
     ImageChip: typeof import('./src/components/ImageChip.vue')['default']
     ImagePicker: typeof import('./src/components/ImagePicker.vue')['default']
     MessageActions: typeof import('./src/components/MessageActions.vue')['default']
