@@ -17,6 +17,7 @@ declare module 'vue' {
     MessageActions: typeof import('./src/components/MessageActions.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
+    Sidebar: typeof import('./src/components/Sidebar.vue')['default']
     StreamMarkdownRender: typeof import('./src/components/StreamMarkdownRender.vue')['default']
     SvgIcon: typeof import('./src/components/SvgIcon.vue')['default']
   }

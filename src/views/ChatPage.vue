@@ -67,6 +67,12 @@
               class="text-sm text-gray-400"
             >这次回答没有完成（生成被中断了）。</p>
             <StreamMarkdownRender :content="chat.content" />
+            <!-- 这一轮出错了：正文很可能只说了一半（模型先讲了两句才被拦/超时），
+                 把原因亮出来 —— 不然用户看到的是半截回答，会以为它已经答完了 -->
+            <p
+              v-if="chat.failed && !chat.pending"
+              class="text-sm text-amber-600 mt-1.5 whitespace-pre-wrap"
+            >{{ chat.failed }}</p>
             <!-- 消息底部的操作栏：朗读 / 复制 / 重新生成 / 点赞 / 点踩
                  只在流式输出结束后出现（done），打字过程中显示没意义 -->
             <MessageActions
@@ -114,8 +120,9 @@
             :key="t.name"
             type="button"
             class="tool-chip"
-            :class="{ 'is-on': selectedTools.includes(t.name) }"
-            :title="t.description"
+            :class="{ 'is-on': selectedTools.includes(t.name), 'is-off': t.available === false }"
+            :title="t.available === false ? (t.unavailableReason || t.description) : t.description"
+            :disabled="t.available === false"
             @click="toggleTool(t.name)"
           >{{ t.label || t.name }}</button>
         </div>
@@ -261,18 +268,24 @@ const loadTools = async () => {
   } catch {
     saved = null // 存坏了(手动改过)→ 当作没有,走默认
   }
-  const known = new Set(list.map((t) => t.name))
+  const known = new Set(list.filter((t) => t.available !== false).map((t) => t.name))
   if (Array.isArray(saved)) {
     // 只保留后端还认识的工具(后端升级后可能删了某个工具)
+    // ⚠️ 还要滤掉「后端说不可用」的:它们没发给模型,勾上会让后端直接 400
     selectedTools.value = saved.filter((n) => known.has(n))
   } else {
-    selectedTools.value = list.filter((t) => t.defaultEnabled).map((t) => t.name)
+    selectedTools.value = list
+      .filter((t) => t.available !== false && t.defaultEnabled)
+      .map((t) => t.name)
   }
   toolsLoaded.value = list.length > 0
 }
 
 /** 勾/取消一个工具(并记住) */
 const toggleTool = (name) => {
+  // 不可用的工具不让勾 —— 后端没把它发给模型,勾了只会让请求 400
+  const tool = toolList.value.find((t) => t.name === name)
+  if (tool && tool.available === false) return
   const i = selectedTools.value.indexOf(name)
   if (i === -1) {
     selectedTools.value = [...selectedTools.value, name]
@@ -485,6 +498,10 @@ const mapHistory = (list) => {
         content: m.content || '',
         done: true,
         turn,
+        // ⚠️ 失败轮次:新后端会把失败原因存进正文(刷新后看到的就是它);
+        //    但**改之前**存的老数据正文是空的 —— 补一句说明,
+        //    别让用户看到一个空气泡,以为模型啥也没说就结束了
+        failed: m.status === 'error' && !m.content ? '这次回答没有完成（生成出错了）。' : '',
         // status=interrupted = 生成到一半被打断(比如刷新了页面),正文是残缺的
         interrupted: m.status === 'interrupted',
       })
@@ -634,6 +651,11 @@ const startStream = async (userMessage, replyIndex) => {
         if (!responseText) target.pending = true
       } else if (event === 'error') {
         serverError = payload
+        // ⚠️ 原因要**记在气泡上**,不能只在「内容为空」时才显示 ——
+        //    模型常常先说一两句才失败(比如被内容审核拦下、或第二轮超时),
+        //    那时内容不为空,错误就整个被吞掉了:用户看到半截回答,像成功了一样,
+        //    根本不知道这一轮其实没答完。
+        if (target) target.failed = payload
       }
     })
 
@@ -641,6 +663,7 @@ const startStream = async (userMessage, replyIndex) => {
     const target = reply()
     if (target && !target.content) {
       target.content = serverError || '抱歉，模型这次没返回内容，请再试一次。'
+      target.failed = '' // 原因已经当正文了,别再在下面显示一遍
     }
   } catch (e) {
     const target = reply()
@@ -650,9 +673,13 @@ const startStream = async (userMessage, replyIndex) => {
       target.content = target.content || '已取消。'
     } else {
       console.error('发送消息错误: ', e)
-      // 已经有部分正文就留着（用户还能看到模型答了一半的内容），
-      // 什么都没有才用错误原因顶上
-      target.content = target.content || e.message || '抱歉，请求出错了，请稍后重试。'
+      const reason = e.message || '抱歉，请求出错了，请稍后重试。'
+      if (target.content) {
+        // 已经有部分正文就留着(用户还能看到模型答了一半的内容),把失败原因标在下面
+        target.failed = reason
+      } else {
+        target.content = reason
+      }
     }
   } finally {
     const target = reply()
@@ -699,6 +726,9 @@ const runVisionRequest = async (file, question, replyIndex) => {
       },
       onServerError: (reason) => {
         serverError = reason
+        // ⚠️ 同文字对话:失败原因要记在气泡上,不能只在「内容为空」时才显示
+        const t = reply()
+        if (t) t.failed = reason
       },
       onChunk: (_delta, all) => {
         const target = reply()
@@ -711,6 +741,7 @@ const runVisionRequest = async (file, question, replyIndex) => {
     const target = reply()
     if (target && !target.content) {
       target.content = serverError || '抱歉，模型这次没返回内容，请再试一次。'
+      target.failed = '' // 原因已经当正文了,别再在下面显示一遍
     }
   } catch (e) {
     const target = reply()
@@ -719,9 +750,13 @@ const runVisionRequest = async (file, question, replyIndex) => {
       target.content = target.content || '已取消。'
     } else {
       console.error('看图说话失败: ', e)
-      // 已经收到一部分正文就留着（用户还能看到模型答了一半的内容），
-      // 什么都没有才用错误原因顶上
-      target.content = target.content || e.message || '抱歉，请求出错了，请稍后重试。'
+      const reason = e.message || '抱歉，请求出错了，请稍后重试。'
+      if (target.content) {
+        // 已经收到一部分正文就留着（用户还能看到模型答了一半的内容），把失败原因标在下面
+        target.failed = reason
+      } else {
+        target.content = reason
+      }
     }
   } finally {
     const target = reply()
@@ -767,7 +802,7 @@ const sendTextMessage = async () => {
   //   ⚠️ 只数**文字**消息：后端的记忆里只有文字轮次，
   //      把看图说话的提问也数进去会跟后端对不上（反馈的 turnIndex 会指错）
   const turn = chatList.value.filter((c) => c.role === 'user' && (c.kind ?? 'text') === 'text').length
-  chatList.value.push({ id: genId(), role: 'assistant', kind: 'text', content: '', pending: true, done: false, turn })
+  chatList.value.push({ id: genId(), role: 'assistant', kind: 'text', content: '', pending: true, done: false, failed: '', turn })
   const replyIndex = chatList.value.length - 1
 
   // 清空输入框并把高度收回去。
@@ -817,6 +852,7 @@ const sendVisionMessage = async () => {
     content: '',
     pending: true,
     done: false,
+    failed: '',
     turn,
   })
   // ⚠️ 必须在**推完回复消息之后**再算下标 ——
@@ -836,17 +872,19 @@ const sendVisionMessage = async () => {
 }
 
 /**
- * 回滚后端记忆里的最后一轮（重新生成的前置动作）
+ * 回滚最后一轮（重新生成的前置动作）
  *
  * ⚠️ 为什么必须有这一步：后端按 chatId 存对话记忆（[u1,a1,u2,a2,…]），
  *    直接把同一个提问再发一次，模型会**看到上一版答案**再去回答 ——
  *    变成「在旧答案上改写」，而不是 ChatGPT 那种「换一个答案」。
- *    而且每点一次就往记忆文件里多追加一轮，聊久了记忆越来越脏。
+ *
+ * <p>后端这个接口两处存储一起回滚：记忆窗口（模型看的）+ 归档（用户看的）。
+ *    只退记忆窗口的话，刷新页面会看到同一个问题问了两遍。
  *
  * @returns {Promise<boolean>} 是否成功回滚
  */
 const rollbackLastTurn = async () => {
-  return chatApi.rollbackLastTurn(chatId.value)
+  return conversationApi.rollbackLastTurn(chatId.value)
 }
 
 /**
@@ -893,6 +931,7 @@ const regenerateText = async (idx) => {
     target.pending = true
     target.done = false
     target.interrupted = false
+    target.failed = '' // ⚠️ 上一轮的失败标记要清掉,不然重试时那个错误还挂在下面
     scrollToBottom(true)
 
     await startStream(question.content, idx)
@@ -919,6 +958,7 @@ const regenerateVision = async (idx) => {
   target.content = ''
   target.pending = true
   target.done = false
+  target.failed = '' // ⚠️ 上一轮的失败标记要清掉,不然重试时那个错误还挂在下面
   scrollToBottom(true)
 
   await runVisionRequest(question.file, question.content, idx)
@@ -1265,6 +1305,19 @@ watch(
   color: #fff;
   background: #4d6bfe;
   border-color: #4d6bfe;
+}
+
+/* 不可用的工具(比如 GitHub 没配 PAT):灰着、点不动 —— 鼠标悬停能看到原因 */
+.tool-chip.is-off {
+  color: #9ca3af;
+  background: #f9fafb;
+  border-color: #e5e7eb;
+  cursor: not-allowed;
+}
+
+.tool-chip.is-off:hover {
+  border-color: #e5e7eb;
+  color: #9ca3af;
 }
 
 /* ---------- 看图说话 ---------- */

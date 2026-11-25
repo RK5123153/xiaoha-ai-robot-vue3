@@ -18,7 +18,7 @@
  *   <li><b>老栈</b> {@code /v2/ai/**} —— 没有会话列表的概念(聊天记录在服务端文件/Cassandra 里,
  *       前端自己造 chatId)。新栈没覆盖到的地方还在用它:
  *       工具清单({@code /v2/ai/tools})、点赞点踩({@code /v2/ai/feedback})、
- *       回滚最后一轮({@code /v2/ai/chats/{chatId}/last-turn})、语音合成({@code /v2/ai/speech})。</li>
+ *       语音合成({@code /v2/ai/speech})。</li>
  * </ul>
  *
  * <p>换环境(打包到别的域名)也只改 {@link SERVER_BASE} 这一处。
@@ -283,6 +283,30 @@ export const conversationApi = {
   },
 
   /**
+   * 回滚最后一轮 —— 前端「重新生成」的前置动作。
+   *
+   * <p>不先回滚的话,模型会看到上一版答案,变成「在旧答案上改写」而不是「换一个答案」。
+   *
+   * <p>⚠️ 后端这个接口**两处存储一起回滚**:记忆窗口(Cassandra,给模型看的近场)
+   * + 归档(PostgreSQL,给用户看的历史)。只回滚记忆窗口的话,用户刷新页面会看到
+   * 「提问 + 旧答案 + 同样的提问 + 新答案」—— 同一个问题问了两遍。
+   *
+   * @param {string} chatId 会话 uuid
+   * @returns {Promise<boolean>} 是否成功
+   */
+  async rollbackLastTurn(chatId) {
+    try {
+      const res = await fetch(
+        `${CONVERSATION_BASE}/${encodeURIComponent(chatId)}/last-turn`,
+        { method: 'DELETE' }
+      )
+      return res.ok
+    } catch {
+      return false
+    }
+  },
+
+  /**
    * 发一条消息,拿流式回复
    *
    * <p>⚠️ 这是 **POST**,所以不能用 EventSource(它只能发 GET)——
@@ -322,20 +346,27 @@ export const conversationApi = {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        // ⚠️ **不要**加 `Accept: text/event-stream`
+        // ⚠️ **故意不带** `Accept: text/event-stream`
         //
-        // 后端的这个接口声明了 produces=text/event-stream,响应类型由它决定,
-        // 加上这个头没用。但加了就**坏消息**:
-        //   带 Accept 头 → 失败时返回 503 + **空 body**(错误处理也想按 SSE 输出,
-        //                   结果 JSON 错误体写不进去,body 是空的)
-        //   不带 Accept 头 → 失败时返回 503 + 正常的 JSON 错误体
-        //                    {"message":"provider 'deepseek' 没有配置 API key..."}
+        // 后端已经修好了:错误响应恒为 application/json(见后端 ApiExceptionHandler#json),
+        // 带不带这个头都能拿到失败原因。
+        // 但这里仍然不发 —— 万一前端先于后端更新上线,老后端带 Accept 时会返回
+        // 503 + 空 body,失败原因就又看不见了。不带这个头,新老后端都能拿到原因。
         //
-        // 而用户最需要看到的恰恰是失败原因 —— 所以这里**故意不带** Accept 头。
-        // (读 SSE 不需要它:我们自己按字节拆帧,见 utils/sse.js)
+        // (读 SSE 本来也不需要它:响应类型由后端的 produces 决定,
+        //  字节流是我们自己按帧拆的,见 utils/sse.js)
       },
       body: JSON.stringify(body),
       signal,
+    }).catch((e) => {
+      // 网络层面的失败(后端没起、端口不通、跨域被拒)—— fetch 自己就抛了,
+      // 上面那套「读错误体」的逻辑根本走不到。
+      // ⚠️ AbortError 是「我们自己掐断的」(切会话/离开页面),原样抛出去:
+      //    上层靠 e.name 区分「取消」和「出错」,翻译了就认不出来了。
+      if (e.name === 'AbortError') {
+        throw e;
+      }
+      throw new Error('网络连接失败,请检查后端服务是否在运行');
     })
     if (!res.ok) throw new Error(await readErrorMessage(res))
     return res
@@ -374,34 +405,15 @@ export const modelApi = {
 }
 
 /**
- * 老栈:工具 / 反馈 / 回滚(/v2/ai/**)
+ * 老栈:工具 / 反馈(/v2/ai/**)
  *
  * <p>新栈(/chat/**)没有这几个能力,但后端还留着,前端继续用。
+ *
+ * <p>⚠️ 「回滚最后一轮」原来也在这组里(DELETE /v2/ai/chats/{chatId}/last-turn),
+ *    已经搬到新栈(见 {@link conversationApi.rollbackLastTurn}):回滚要连归档一起退,
+ *    而归档只有新栈才有 —— 挂在老栈下面的话语义会「只做一半」。
  */
 export const chatApi = {
-  /**
-   * 回滚最后一轮 —— 前端「重新生成」的前置动作。
-   *
-   * <p>不先回滚的话,模型会看到上一版答案,变成「在旧答案上改写」而不是「换一个答案」。
-   *
-   * <p>⚠️ ���个接口挂在老栈(/v2/ai)上,但操作的是**同一份数据**:
-   *    新栈建的会话 uuid 传进去也能删掉最后一轮(后端两边读的是同一个存储)。
-   *
-   * @param {string} chatId
-   * @returns {Promise<boolean>} 是否成功
-   */
-  async rollbackLastTurn(chatId) {
-    try {
-      const res = await fetch(
-        `${LEGACY_CHAT_BASE}/chats/${encodeURIComponent(chatId)}/last-turn`,
-        { method: 'DELETE' }
-      )
-      return res.ok
-    } catch {
-      return false
-    }
-  },
-
   /**
    * 点赞/点踩上报 —— 后端记 JSONL,失败也不打扰用户。
    *
