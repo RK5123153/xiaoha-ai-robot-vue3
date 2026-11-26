@@ -116,6 +116,41 @@ export const parseSseFrames = (text) => {
 }
 
 /**
+ * 空闲多久算「流断了」(ms)
+ *
+ * <p>⚠️ 为什么给得这么宽(3 分钟):
+ *   后端**没有心跳机制** —— 思考阶段它一个字节都不发(只有具名事件)。
+ *   所以模型「想得久」和「连接死了」从外面看是一样的:什么都不来。
+ *   定得太短会把正常的慢请求掐掉(用户白等一场,答案还丢了),
+ *   定得太长又等于没有 —— 3 分钟是「慢到离谱」和「彻底死了」之间的折中。
+ */
+const DEFAULT_IDLE_TIMEOUT = 180000
+
+/**
+ * 读一个分片,带空闲超时
+ *
+ * <p>⚠️ 用 Promise.race 而不是 AbortSignal:超时是「读这一片读太久」,
+ *    不是「取消整个请求」—— 连接本身可能还有救(比如下一个分片就来了)。
+ *
+ * @param {ReadableStreamDefaultReader} reader
+ * @param {number} ms 空闲超时;0 = 不限
+ */
+const readWithIdleTimeout = async (reader, ms) => {
+  if (!ms) return reader.read()
+  let timer
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('连接超时,模型长时间没有回应')), ms)
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
  * 读干一个 SSE 响应流,逐帧回调
  *
  * ⚠️ 两个容易踩的坑:
@@ -126,8 +161,10 @@ export const parseSseFrames = (text) => {
  *
  * @param {Response} response fetch 的响应(必须是 text/event-stream)
  * @param {(frame: {event: string, data: string}) => void} onFrame 每帧回调
+ * @param {object} [options]
+ * @param {number} [options.idleTimeout] 空闲多久算断了;0 = 不限
  */
-export const readSseStream = async (response, onFrame) => {
+export const readSseStream = async (response, onFrame, { idleTimeout = DEFAULT_IDLE_TIMEOUT } = {}) => {
   if (!response.body) throw new Error('这个浏览器不支持流式读取响应')
 
   const reader = response.body.getReader()
@@ -140,7 +177,7 @@ export const readSseStream = async (response, onFrame) => {
 
   try {
     for (;;) {
-      const { done, value } = await reader.read()
+      const { done, value } = await readWithIdleTimeout(reader, idleTimeout)
       if (done) break
 
       buffer += decoder.decode(value, { stream: true })

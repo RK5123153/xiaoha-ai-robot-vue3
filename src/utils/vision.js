@@ -22,7 +22,8 @@
  *   event: error    → 模型没吐出正文时补发,data 是中文原因
  */
 
-import { readErrorMessage, visionApi } from './api.js'
+import { readErrorMessage } from '@/api/base.js'
+import { visionApi } from '@/api/vision.js'
 import { parseChunkPayload, readSseStream } from './sse.js'
 
 /** 用户什么都没说时的默认问题(后端也有一份,但这里自己给更可控) */

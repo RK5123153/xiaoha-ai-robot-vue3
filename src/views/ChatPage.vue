@@ -101,7 +101,8 @@
           v-model="message"
           :attachment="attachment"
           :busy="preparingImage"
-          :send-disabled="sendDisabled"
+          :send-disabled="sendState.disabled"
+          :send-hint="sendState.hint"
           :placeholder="mode === 'vision' ? '描述这张图…（留空就让模型自己描述）' : '给小哈 AI 机器人发送消息（Enter 发送，Shift + Enter 换行）'"
           :allow-image="mode === 'vision'"
           :show-tools="mode === 'text'"
@@ -133,7 +134,8 @@ import ChatInputBox from '@/components/ChatInputBox.vue'
 import ImagePreview from '@/components/ImagePreview.vue'
 import { parseChunkPayload, readSseStream } from '@/utils/sse.js'
 import { lastRegenerableId, turnIndexOf as turnIndexOfMessage } from '@/utils/chat-turn.js'
-import { chatApi, conversationApi } from '@/utils/api.js'
+import { conversationApi } from '@/api/conversation.js'
+import { feedbackApi } from '@/api/chat.js'
 import { useAttachment } from '@/utils/attachment.js'
 import { sendVisionStream, DEFAULT_QUESTION } from '@/utils/vision.js'
 import { handoff, loadChats, modelState, toolsParam, resolveWebSearch } from '@/utils/chat-store.js'
@@ -417,7 +419,7 @@ const startStream = async (userMessage, replyIndex) => {
   streamController = controller
 
   try {
-    // ⚠️ URL 由接口层拼(utils/api.js):组件里不出现任何后端地址,
+    // ⚠️ URL 由接口层拼(api/conversation.js):组件里不出现任何后端地址,
     //    后端换路径/加参数只改那一处。
     //
     // ⚠️ 这里是 **POST**,不能用 EventSource(它只能发 GET)——
@@ -579,12 +581,23 @@ const runVisionRequest = async (file, question, replyIndex) => {
   }
 }
 
-/** 发送按钮该不该禁用 */
-const sendDisabled = computed(() => {
-  if (isSending.value || preparingImage.value) return true
-  // 看图说话：有图就能发（问题可以留空，让模型自己描述）
-  if (mode.value === 'vision') return !attachment.value
-  return !message.value.trim()
+/**
+ * 发送按钮的状态:能不能发 + 发不了的话为什么
+ *
+ * <p>两个信息放一起算 —— 拆成两个 computed 的话,
+ *    以后加一条规则忘了同步另一个,就会出现「按钮灰着却说不出为什么」。
+ */
+const sendState = computed(() => {
+  if (isSending.value) return { disabled: true, hint: '正在发送…' }
+  if (preparingImage.value) return { disabled: true, hint: '正在压缩图片…' }
+  // 看图说话:有图就能发(问题可以留空,让模型自己描述)
+  if (mode.value === 'vision') {
+    return attachment.value
+      ? { disabled: false, hint: '' }
+      : { disabled: true, hint: '先选一张图' }
+  }
+  if (!message.value.trim()) return { disabled: true, hint: '说点什么再发' }
+  return { disabled: false, hint: '' }
 })
 
 // 发送消息
@@ -795,7 +808,7 @@ const handleFeedback = (messageId, rating) => {
 
   // 上报后端（接口还没上线时失败也无妨，本地状态照常生效）
   // 取消点赞/点踩暂不上报 —— 后端按「最后一条记录为准」处理
-  chatApi.feedback({
+  feedbackApi.submit({
     // ⚠️ 看图说话用自己的 chatId：它没有记忆，
     //    共用一个的话反馈里的 turnIndex 会和文字对话的撞车
     chatId: isVision ? visionChatId : chatId.value,

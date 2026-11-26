@@ -65,18 +65,28 @@
 
       <div class="flex items-center gap-2 ml-auto">
         <ImagePicker v-if="allowImage" :disabled="busy" @pick="onPickImage" />
-        <button
-          type="button"
-          @click="$emit('send')"
-          :disabled="sendDisabled"
-          aria-label="发送消息"
-          title="发送（Enter）"
-          class="flex items-center justify-center bg-[#4d6bfe] text-white rounded-full w-8 h-8
-                 border border-[#4d6bfe] hover:bg-[#3b5bef] transition-colors
-                 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-[#4d6bfe]"
-        >
-          <ArrowUpOutlined class="text-xl" />
-        </button>
+        <!--
+          ⚠️ 发送按钮用 aria-disabled 而不是 disabled:
+          disabled 的按钮在浏览器里**不派发鼠标事件**,antd 的 Tooltip 靠的就是这些事件
+          → 灰着的按钮反而**弹不出**「为什么还不能发」的说明,而这恰恰是最需要说明的时候。
+          (和 ToolBar 里那排工具开关一个道理。)
+
+          ⚠️ 别再给这个按钮加原生 title —— title 和 a-tooltip 会**弹两次**。
+        -->
+        <a-tooltip :title="sendTooltip" placement="top">
+          <button
+            type="button"
+            @click="onSend"
+            :aria-disabled="sendDisabled"
+            aria-label="发送消息"
+            class="flex items-center justify-center bg-[#4d6bfe] text-white rounded-full w-8 h-8
+                   border border-[#4d6bfe] hover:bg-[#3b5bef] transition-colors
+                   aria-disabled:opacity-50 aria-disabled:cursor-not-allowed
+                   aria-disabled:hover:bg-[#4d6bfe]"
+          >
+            <ArrowUpOutlined class="text-xl" />
+          </button>
+        </a-tooltip>
       </div>
     </div>
 
@@ -116,6 +126,16 @@ const props = defineProps({
   sendDisabled: {
     type: Boolean,
     default: false,
+  },
+  /**
+   * 发送按钮置灰的原因(鼠标悬停时显示)
+   *
+   * <p>比如看图说话模式下是「先选一张图」——
+   *    光看一个灰按钮,用户不知道还差什么。
+   */
+  sendHint: {
+    type: String,
+    default: '',
   },
   /** 占位提示 */
   placeholder: {
@@ -223,6 +243,31 @@ const handleKeydown = (e) => {
   if (Date.now() - composingEndedAt < 100) return
   if (e.shiftKey) return
   e.preventDefault()
+  emit('send')
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+ * 发送
+ * ────────────────────────────────────────────────────────────────────── */
+
+/**
+ * 发送按钮悬停时显示什么
+ *
+ * <p>发不了的时候显示「为什么发不了」(比如「先选一张图」),
+ *    能发的时候显示「发送（Enter）」。
+ */
+const sendTooltip = computed(() =>
+  props.sendDisabled ? props.sendHint || '现在还不能发送' : '发送（Enter）'
+)
+
+/**
+ * 点发送
+ *
+ * <p>⚠️ 按钮用的是 aria-disabled 而不是 disabled(为了让 Tooltip 能弹出来),
+ *    所以「置灰」只是样子 —— 点击事件照样会来,得在这儿真拦一道。
+ */
+const onSend = () => {
+  if (props.sendDisabled) return
   emit('send')
 }
 

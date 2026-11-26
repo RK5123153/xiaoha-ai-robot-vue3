@@ -12,7 +12,7 @@
  * 后端没开时接口返回 501，正好触发退回 —— 不用在前端配开关跟着后端改。
  *
  * 后端接口：POST {CHAT_BASE}/speech  body {"text":"要念的纯文本"}  → audio/mpeg
- * （地址在 utils/api.js 的 ttsApi 里，本文件不拼 URL）
+ * （地址在 api/tts.js 的 ttsApi 里，本文件不拼 URL）
  * ⚠️ 必须先剥掉 Markdown（`toPlainText`），别把 ``` 和 ** 一起送过去。
  *
  * 用后端 TTS 顺带解决了一个浏览器 TTS 的老 bug：
@@ -21,7 +21,7 @@
  */
 
 import { speakText, speechSupported, stopSpeaking } from './speech.js'
-import { ttsApi } from './api.js'
+import { ttsApi } from '@/api/tts.js'
 
 /**
  * 总开关：设成 false 就一直用浏览器内置 TTS，一个请求都不发。
@@ -102,7 +102,7 @@ export const stopTts = () => {
 /**
  * 请求后端合成一段 mp3
  *
- * 具体的「往哪个地址发」在 utils/api.js 里(接口层),这里只管调用。
+ * 具体的「往哪个地址发」在 api/tts.js 里(接口层),这里只管调用。
  *
  * @param {string} text 纯文本
  * @param {AbortSignal} [signal]

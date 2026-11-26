@@ -45,7 +45,8 @@
           v-model="message"
           :attachment="attachment"
           :busy="preparingImage"
-          :send-disabled="sendDisabled"
+          :send-disabled="sendState.disabled"
+          :send-hint="sendState.hint"
           allow-image
           @send="send"
           @pick-image="pickImage"
@@ -63,7 +64,7 @@ import { useRouter } from 'vue-router'
 import BrandLogo from '@/components/BrandLogo.vue'
 import ChatInputBox from '@/components/ChatInputBox.vue'
 import DisclaimerBar from '@/components/DisclaimerBar.vue'
-import { conversationApi } from '@/utils/api.js'
+import { conversationApi } from '@/api/conversation.js'
 import { useAttachment } from '@/utils/attachment.js'
 import { handoff, genUuid } from '@/utils/chat-store.js'
 
@@ -89,14 +90,20 @@ const { attachment, preparingImage, pickImage, removeImage, detachPreviewUrl } =
 /** 正在建会话(等后端给 uuid)—— 这段时间里发送按钮置灰 */
 const sending = ref(false)
 
-/** 发送按钮该不该禁用 */
-const sendDisabled = computed(() => {
-  if (preparingImage.value) return true
+/**
+ * 发送按钮的状态:能不能发 + 发不了的话为什么
+ *
+ * <p>两个信息放一起算 —— 拆成两个 computed 的话,
+ *    以后加一条规则忘了同步另一个,就会出现「按钮灰着却说不出为什么」。
+ */
+const sendState = computed(() => {
+  if (preparingImage.value) return { disabled: true, hint: '正在压缩图片…' }
   // 正在建会话:这段时间里按钮要置灰,不然连点两下会建两个会话
-  if (sending.value) return true
+  if (sending.value) return { disabled: true, hint: '正在创建会话…' }
   // 有图就能发(问题可以留空,让模型自己描述)
-  if (attachment.value) return false
-  return !message.value.trim()
+  if (attachment.value) return { disabled: false, hint: '' }
+  if (!message.value.trim()) return { disabled: true, hint: '说点什么再发' }
+  return { disabled: false, hint: '' }
 })
 
 /** 点建议卡片:把文字填进输入框,并把光标放过去让人改 */
@@ -120,7 +127,7 @@ const useSuggestion = async (s) => {
  *    用户在这中间点了侧边栏别的会话,那条消息就会发到别的会话里去。
  */
 const send = async () => {
-  if (sendDisabled.value) return
+  if (sendState.value.disabled) return
 
   const text = message.value.trim()
   const file = attachment.value

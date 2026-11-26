@@ -16,7 +16,9 @@
  */
 
 import { reactive, computed } from 'vue'
-import { conversationApi, modelApi, chatApi } from './api.js'
+import { conversationApi } from '@/api/conversation.js'
+import { modelApi } from '@/api/model.js'
+import { toolApi } from '@/api/chat.js'
 
 /** 会话列表 / 加载状态 */
 export const chatState = reactive({
@@ -328,7 +330,7 @@ export const loadTools = async () => {
   // 已经拉到了就别再拉:第二次会用 localStorage 里的旧值
   // **覆盖**用户刚刚在页面上做的勾选 —— 那就白勾了。
   if (toolState.loaded) return
-  const list = await chatApi.tools()
+  const list = await toolApi.list()
   toolState.list = list
 
   let saved = null
