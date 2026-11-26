@@ -14,8 +14,13 @@
     -->
 
     <!-- 聊天记录区域：自己滚动，输入框始终钉在底部 -->
+    <!--
+      ⚠️ data-chat-scroll:侧边栏的会话列表也用了 .chat-scroll 这个类(样式是共用的),
+         脚本里要定位「聊天区」得能一眼选中它 —— 别拿 .chat-scroll 选,会选到侧边栏去。
+    -->
     <div
       class="chat-scroll flex-1 min-h-0 overflow-y-auto pt-4 px-4 pb-2"
+      data-chat-scroll
       ref="chatScrollRef"
       @scroll="handleScroll"
     >
@@ -25,7 +30,21 @@
       </div>
 
       <!-- 内容限宽:宽屏上不让气泡拉成一整行(一行字太长不好读) -->
-      <div class="mx-auto w-full max-w-3xl">
+      <div ref="chatContentRef" class="mx-auto w-full max-w-3xl">
+      <!--
+        往上翻页的提示:
+        · 正在加载 → 一行小字,别让用户以为「滑到顶就没了」;
+        · 已经到头 → 明说「以上是全部对话」,不然用户会一直往上滑。
+      -->
+      <div v-if="loadingOlder" class="flex justify-center py-3 text-xs text-gray-400">
+        正在加载更早的消息…
+      </div>
+      <div
+        v-else-if="!historyHasMore && historyMessageCount > 0"
+        class="flex justify-center py-3 text-xs text-gray-300"
+      >
+        — 以上是全部对话 —
+      </div>
       <!-- 遍历聊天记录 -->
       <template v-for="chat in chatList" :key="chat.id">
         <!-- 用户提问消息（靠右） -->
@@ -165,7 +184,13 @@ import BrandLogo from '@/components/BrandLogo.vue'
 import ChatInputBox from '@/components/ChatInputBox.vue'
 import ImagePreview from '@/components/ImagePreview.vue'
 import { parseChunkPayload } from '@/utils/sse.js'
-import { lastRegenerableId, turnIndexOf as turnIndexOfMessage } from '@/utils/chat-turn.js'
+import {
+  lastRegenerableId,
+  turnIndexOf as turnIndexOfMessage,
+  assignTurns,
+  baseTurnOf,
+  countUserTurns,
+} from '@/utils/chat-turn.js'
 import { conversationApi } from '@/api/conversation.js'
 import { feedbackApi } from '@/api/chat.js'
 import { useAttachment } from '@/utils/attachment.js'
@@ -225,6 +250,8 @@ const { text: message } = useDraft(chatId)
 /** 输入框组件(要拿它的 focus) */
 const inputRef = ref(null)
 const chatScrollRef = ref(null)
+/** 聊天内容的容器(高度会变 —— 盯它就知道内容什么时候稳定了) */
+const chatContentRef = ref(null)
 const isSending = ref(false)
 
 /** 生成消息 id */
@@ -240,12 +267,38 @@ const genId = () =>
  */
 const stickToBottom = ref(true)
 
+/**
+ * 上一次已知的滚动位置
+ *
+ * <p>用来判断「这次 scroll 事件是不是位置真的动了」——
+ *    内容长高也会触发 scroll 事件,那时位置没动(见 handleScroll)。
+ */
+let lastScrollTop = 0
+
+/**
+ * 离顶部多近就往上翻页
+ *
+ * <p>给 80px 的余量:用户滑到顶之前就先加载好了,不用等他滑到头才发现还有更多。
+ */
+const TOP_TRIGGER = 80
+
 // 用户手动滚动时更新贴底状态
 const handleScroll = () => {
   const el = chatScrollRef.value
   if (!el) return
-  // 距底部 24px 以内视为贴底（留一点余量，避免滚动条本身造成抖动）
-  stickToBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight <= 24
+  // ⚠️ 只在**位置真的动了**的时候更新贴底状态:
+  //    内容长高(等 Markdown 渲染完)也会触发 scroll 事件,那时位置没动 ——
+  //    用户其实还贴着底,不能因为内容变高就判定「他往上翻了」,
+  //    否则一加载完历史就再也贴不回底部了(打开会话停在半截对话上)。
+  if (el.scrollTop !== lastScrollTop) {
+    // 距底部 24px 以内视为贴底（留一点余量，避免滚动条本身造成抖动）
+    stickToBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight <= 24
+    lastScrollTop = el.scrollTop
+  }
+  // ⚠️ 滑到顶部了就往上翻一页(更早的消息)。
+  //    这里不判「是不是用户滑的」:prepend 完把滚动位置挪回去也会触发 scroll 事件,
+  //    而挪回去之后 scrollTop 已经不在顶部了(loadOlderHistory 内部有并发/到底了的保护)。
+  if (el.scrollTop <= TOP_TRIGGER) loadOlderHistory()
 }
 
 /**
@@ -258,6 +311,45 @@ const scrollToBottom = async (force = false) => {
   if (!el) return
   if (!force && !stickToBottom.value) return
   el.scrollTop = el.scrollHeight
+}
+
+/**
+ * 盯住内容高度:长高了还贴底就继续贴底
+ *
+ * <p>⚠️ 为什么不能只在「加载完」那一刻滚一次底:
+ *   历史消息先进 DOM、Markdown 组件**再异步渲染**(渲染管线是动态 import 的),
+ *   气泡高度会**再变一次** —— 只滚一次的话,位置停在「当时的底部」,
+ *   用户打开会话看到的是**半截对话**(实测:最新那一轮被输入框挡住一半)。
+ *
+ * <p>⚠️ 判断「用户还贴不贴底」要用**长高之前**的高度:
+ *   内容是在**下面**长高的(新消息排在后面),长高之前贴底 = 现在也该贴底。
+ *   拿长高后的高度算就错了 —— 中间那截多出来的空档会被当成「用户往上翻了」,
+ *   于是再也回不到底。
+ *
+ * <p>⚠️ 往上翻页(prepend)也会让高度变 —— 那时不能跟着滚,
+ *    prepend 完自己会把位置挪回去(见 loadOlderHistory)。
+ */
+let contentObserver = null
+/** 上一次看到的内容高度(判断「长高之前贴不贴底」用的) */
+let lastContentHeight = 0
+const watchContentHeight = () => {
+  if (!window.ResizeObserver || !chatContentRef.value) return
+  contentObserver?.disconnect()
+  lastContentHeight = 0
+  contentObserver = new ResizeObserver(() => {
+    const el = chatScrollRef.value
+    if (!el) return
+    const height = el.scrollHeight
+    // 长高之前贴不贴底(用长高之前的高度算)
+    const wasAtBottom = lastContentHeight - el.scrollTop - el.clientHeight <= 24
+    lastContentHeight = height
+    // ⚠️ 往上翻页的时候别跟着滚 —— prepend 完自己会把位置挪回去
+    if (loadingOlder.value) return
+    if (!wasAtBottom) return
+    stickToBottom.value = true
+    el.scrollTop = height
+  })
+  contentObserver.observe(chatContentRef.value)
 }
 
 /* ──────────────────────────────────────────────────────────────────────
@@ -328,42 +420,73 @@ watch(
 )
 
 /* ──────────────────────────────────────────────────────────────────────
- * 历史消息
+ * 历史消息(分页加载)
  * ────────────────────────────────────────────────────────────────────── */
+
+/**
+ * 一页拉多少条历史消息
+ *
+ * <p>⚠️ 后端一条消息 = 一轮问答里的**一条**(提问或回答),
+ *    所以 20 条 ≈ 10 轮。绝大多数会话一轮都用不完,
+ *    一次拉完最省事;真的聊了很多轮,再靠「往上一滑」往上翻。
+ */
+const HISTORY_PAGE_SIZE = 20
+
+/** 下一页的游标(= 上一页最老那条的锚点);空串 = 没有更早的了 */
+const historyCursor = ref('')
+/** 还有更早的消息吗 */
+const historyHasMore = ref(false)
+/** 正在往上翻页(防止连点触发并发请求) */
+const loadingOlder = ref(false)
+/** 已经加载了多少条历史消息(问候语不算) */
+const historyMessageCount = ref(0)
+
+/**
+ * 这个会话一共多少轮 —— 后端数出来的(归档里 user 消息的条数)。
+ *
+ * <p>⚠️ 为什么前端需要这个数:分页加载时窗口只装得下一部分消息,
+ *    而「第 k 轮」必须是从**会话开头**数起的(反馈上报拿 turnIndex 当定位标识)。
+ *    不知道总数,长会话里的轮次号就会整体偏移。
+ *    老后端没这个字段 → 0 → 轮次号退化成「从窗口起点算」的相对值。
+ */
+const totalTurns = ref(0)
+
+/**
+ * 窗口里**已归档**的提问条数(= 页面加载的 + 本地发出去被后端记下的)
+ *
+ * <p>总轮数里有还没加载进来的,也有刚发出去后端还没记的 ——
+ *    这个数就是「窗口里已经算数的那部分」,拿它和总轮数一减,
+ *    就知道窗口前面还压着几轮。
+ */
+const archivedInWindow = ref(0)
+
+/**
+ * 窗口前面还有几轮(窗口里最早那条之前有多少轮)
+ *
+ * <p>= 总轮数 - 窗口里已归档的轮次数。
+ */
+const baseTurn = ref(0)
 
 /**
  * 把后端存的消息转成前端的气泡
  *
- * <p>⚠️ 轮次(turn)要自己数:后端存的消息里没有「第几轮」这个字段,
- *    它只按 user/assistant 交替存。前端要靠它算反馈的 turnIndex
- *    (一条回答是它上面那条提问的「第 k 轮」的回答)。
+ * <p>⚠️ 这里**不**给消息编号轮次:轮次要在整个窗口上一起数
+ *    (见 assignTurns)—— 分页加载时窗口会变,单独编号对不上。
  *
  * @param {Array<object>} list 后端的消息数组(按时间正序)
  * @returns {Array<object>} 前端的气泡数组
  */
 const mapHistory = (list) => {
   const out = []
-  let turn = 0
   for (const m of list) {
     if (!m) continue
+    const base = { id: `h-${m.id}`, kind: 'text', content: m.content || '', done: true }
     if (m.role === 'user') {
-      turn += 1
-      out.push({
-        id: `h-${m.id}`,
-        role: 'user',
-        kind: 'text',
-        content: m.content || '',
-        done: true,
-        turn,
-      })
+      out.push({ ...base, role: 'user' })
     } else {
       out.push({
-        id: `h-${m.id}`,
+        ...base,
         role: 'assistant',
-        kind: 'text',
-        content: m.content || '',
-        done: true,
-        turn,
         // ⚠️ 失败轮次:新后端会把失败原因存进正文(刷新后看到的就是它);
         //    但**改之前**存的老数据正文是空的 —— 补一句说明,
         //    别让用户看到一个空气泡,以为模型啥也没说就结束了
@@ -377,28 +500,96 @@ const mapHistory = (list) => {
 }
 
 /**
- * 拉这个会话的历史消息
+ * 重新给消息编号轮次
  *
- * <p>⚠️ 用的是 GET /v13/chats/{uuid}(一次性给全量),
- *    不是 POST /chat/message/list(那个是游标正序翻页,第一页给的是**最早**的消息)。
- *    页面要显示的是「最近聊了什么」,一次性拿全量最省事。
+ * <p>窗口变了(翻页、发了新消息)就得重算:
+ *    窗口前面还有几轮 = 总轮数 - 窗口里**已归档**的轮次数。
+ *
+ * <p>⚠️ 后端没报总轮数(老版本)时只能按窗口的起点算 —— 轮次号是相对的,
+ *    页面显示不受影响,只有反馈上报的定位标识会偏。
+ */
+const renumberTurns = () => {
+  baseTurn.value = baseTurnOf(totalTurns.value, archivedInWindow.value)
+  assignTurns(chatList.value, baseTurn.value)
+}
+
+/**
+ * 拉这个会话的历史消息(**最新的一页**)
+ *
+ * <p>⚠️ 为什么不是「一次性拉全量」:
+ *    长会话一次全拉,首屏要等后端把几百条消息全查出来、全传回来、全渲染出来;
+ *    分页之后首屏只等一页,更早的内容等用户往上一滑再要。
+ *
+ * <p>⚠️ 用的是 POST /chat/message/list(游标分页):不传游标拿到的就是**最新**的一页,
+ *    把返回的 nextCursor 传回去才是更早的一页(见 api/conversation.js)。
  */
 const loadHistory = async () => {
   const uuid = chatId.value
   if (!uuid) return
   loadingHistory.value = true
   try {
-    const list = await conversationApi.history({ uuid })
+    const res = await conversationApi.messages({ chatId: uuid, size: HISTORY_PAGE_SIZE })
     // ⚠️ 拉的过程中用户可能已经切走/发过消息了 ——
     //    对不上就丢掉这次的结果,别把别人的消息塞进来。
     if (chatId.value !== uuid) return
-    chatList.value = list.length ? mapHistory(list) : [{ ...GREETING }]
+    historyCursor.value = res.nextCursor
+    historyHasMore.value = res.hasMore
+    // ⚠️ 绝对赋值(不是累加):换会话时这里要把上一个会话的数清掉
+    totalTurns.value = res.totalTurns
+    archivedInWindow.value = countUserTurns(res.items)
+    historyMessageCount.value = res.items.length
+    chatList.value = res.items.length ? mapHistory(res.items) : [{ ...GREETING }]
+    renumberTurns()
     scrollToBottom(true)
   } catch (e) {
     console.error('拉历史消息失败: ', e)
     chatList.value = [{ ...GREETING }]
   } finally {
     loadingHistory.value = false
+  }
+}
+
+/**
+ * 往上面翻一页(更早的消息)
+ *
+ * <p>⚠️ prepend 之后**必须把滚动位置挪回去**:
+ *    上面凭空多出一屏内容,不管的话用户看到的是「画面猛地跳了一下」——
+ *    他正盯着的那条消息直接被顶出屏幕了,像是点错了。
+ *    办法:记住加载前的 scrollHeight,prepend 完再把 scrollTop 加上新增加的高度。
+ */
+const loadOlderHistory = async () => {
+  if (loadingOlder.value || !historyHasMore.value || !historyCursor.value) return
+  const uuid = chatId.value
+  loadingOlder.value = true
+  const el = chatScrollRef.value
+  const prevHeight = el?.scrollHeight ?? 0
+  const prevTop = el?.scrollTop ?? 0
+  try {
+    const res = await conversationApi.messages({
+      chatId: uuid,
+      size: HISTORY_PAGE_SIZE,
+      cursor: historyCursor.value,
+    })
+    // 拉的过程中用户切了会话 → 这次的结果作废
+    if (chatId.value !== uuid) return
+    historyCursor.value = res.nextCursor
+    historyHasMore.value = res.hasMore
+    // ⚠️ 取两边的较大值:翻页的请求可能在「刚才那一轮被归档」之前就发出去了,
+    //    那时候后端数出来的总轮数还少一轮 —— 直接赋值会把轮次号整体拉低一格。
+    if (res.totalTurns > totalTurns.value) totalTurns.value = res.totalTurns
+    archivedInWindow.value += countUserTurns(res.items)
+    historyMessageCount.value += res.items.length
+    if (res.items.length) {
+      chatList.value = [...mapHistory(res.items), ...chatList.value]
+      renumberTurns()
+      // 把滚动位置挪回去(见上面的说明)
+      await nextTick()
+      if (el) el.scrollTop = prevTop + (el.scrollHeight - prevHeight)
+    }
+  } catch (e) {
+    console.error('加载更早的消息失败: ', e)
+  } finally {
+    loadingOlder.value = false
   }
 }
 
@@ -535,7 +726,9 @@ const appendThinking = (current, add) => {
  *
  * @param {string} userMessage 用户提问原文
  * @param {number} replyIndex  要写入的回复消息下标
- * @returns {Promise<boolean>} 这一轮是不是正常走完了(出错/被掐断 = false)
+ * @returns {Promise<{completed: boolean, archived: boolean}>}
+ *   completed —— 这一轮是不是正常走完了(出错/被掐断 = false)
+ *   archived  —— 后端有没有把这一轮记进归档(= 会话的总轮数要不要 +1)
  */
 const startStream = async (userMessage, replyIndex) => {
   // 通过 chatList 取（而不是直接持有 push 进去的原始对象）才能触发 Vue 响应式更新
@@ -551,6 +744,10 @@ const startStream = async (userMessage, replyIndex) => {
 
   // 这一轮是否正常走完 —— 交接那边要靠它决定「消息算不算发出去了」
   let completed = false
+  // 这一轮有没有被后端记进归档。
+  // ⚠️ 请求压根没送到后端(连不上/被网关掐了)时它压根不存在 ——
+  //    这时候总轮数不能给它加上,否则后面每一轮的编号都整体偏一格。
+  let archived = false
 
   try {
     // ⚠️ URL 由接口层拼(api/conversation.js):组件里不出现任何后端地址,
@@ -584,6 +781,8 @@ const startStream = async (userMessage, replyIndex) => {
         //    parseChunkPayload 同时认新旧两种格式,前后端谁先上线都行。
         const payload = parseChunkPayload(data)
         const target = reply()
+        // ⚠️ 收到帧 = 后端已经在处理这一轮了 → 它会把它记进归档
+        archived = true
         if (!target) return
         if (event === 'message') {
           responseText += payload
@@ -622,10 +821,17 @@ const startStream = async (userMessage, replyIndex) => {
     }
     // ⚠️ 走完了,但后端报告过失败(event:error)→ 不算成功
     completed = !serverError
+    // 流正常结束 = 后端处理完了 → 这一轮进了归档
+    archived = true
   } catch (e) {
     const target = reply()
-    if (!target) return
+    // ⚠️ 流跑到一半用户切了会话,chatList 已经被换掉了 —— 这条气泡没了,
+    //    没什么可收拾的(但结果要return出去,别让调用方拿到 undefined)
+    if (!target) return { completed, archived }
     if (e.name === 'AbortError') {
+      // ⚠️ 请求已经发出去了(中止发生在发送之后),后端会把它记成一轮「被中断」——
+      //    总轮数要算上它,不然后面每一轮的编号都少一格
+      archived = true
       if (userStopped) {
         // 用户主动点了「停止」—— 已经答出来的一半留着,下面标一句「已停止生成」
         // (正文一个字都没有时,那行提示就是全部内容,不让气泡空着)
@@ -656,7 +862,7 @@ const startStream = async (userMessage, replyIndex) => {
     // 侧边栏的会话列表要跟着更新(标题、消息数、最后更新时间)
     sessionStore.loadChats({ reset: true })
   }
-  return completed
+  return { completed, archived }
 }
 
 /**
@@ -796,13 +1002,14 @@ const sendTextMessage = async () => {
   // 用户消息 + 占位的回复一起推，保证一次渲染出来，不会有中间的空白帧
   chatList.value.push({ id: genId(), role: 'user', kind: 'text', content: userMessage })
   // 添加一个占位的回复消息。pending 表示"还没出正文",用来显示「正在思考…」
-  // turn：这是本次会话的第几轮（从 1 开始）——
-  //   问候语是第 0 轮，没有对应的提问，所以不显示「重新生成」按钮
-  //   ⚠️ 只数**文字**消息：后端的记忆里只有文字轮次，
-  //      把看图说话的提问也数进去会跟后端对不上（反馈的 turnIndex 会指错）
-  const turn = chatList.value.filter((c) => c.role === 'user' && (c.kind ?? 'text') === 'text').length
-  chatList.value.push({ id: genId(), role: 'assistant', kind: 'text', content: '', pending: true, done: false, failed: '', turn, thinking: '' })
+  // turn：这一轮是本次会话的第几轮 —— 交给 renumberTurns 统一编号
+  //   (问候语是第 0 轮，没有对应的提问，所以不显示「重新生成」按钮)
+  chatList.value.push({ id: genId(), role: 'assistant', kind: 'text', content: '', pending: true, done: false, failed: '', turn: 0, thinking: '' })
   const replyIndex = chatList.value.length - 1
+  // 编号:第几轮(窗口前面压着几轮 + 窗口里的第几条提问)
+  // ⚠️ 分页加载时窗口前面还压着别的轮次,不能简单数窗口里的提问条数 ——
+  //    renumberTurns 拿后端报的总轮次算出那个偏移(见 renumberTurns 的说明)
+  renumberTurns()
 
   // 清空输入框(高度会自己收回去 —— 输入框组件盯着内容变化)
   message.value = ''
@@ -812,7 +1019,15 @@ const sendTextMessage = async () => {
   // 强制滚到底：用户刚发了消息，无条件跟随
   scrollToBottom(true)
 
-  return startStream(userMessage, replyIndex)
+  const { completed, archived } = await startStream(userMessage, replyIndex)
+  // ⚠️ 后端把这一轮记进归档了 → 会话的总轮数 +1
+  //    (没记的话就不能加:总轮数是轮次号的基准,多算一轮后面全偏)
+  if (archived) {
+    totalTurns.value += 1
+    archivedInWindow.value += 1
+    renumberTurns()
+  }
+  return completed
 }
 
 /**
@@ -828,10 +1043,7 @@ const sendVisionMessage = async () => {
   const question = message.value.trim() || DEFAULT_QUESTION
   isSending.value = true
 
-  // 轮次：看图说话自己一套编号，不跟文字对话混
-  const turn =
-    chatList.value.filter((c) => c.role === 'user' && (c.kind ?? 'text') === 'vision').length + 1
-
+  // 轮次：看图说话自己一套编号，不跟文字对话混(renumberTurns 里分开数)
   chatList.value.push({
     id: genId(),
     role: 'user',
@@ -841,7 +1053,7 @@ const sendVisionMessage = async () => {
     //   /v9 是无状态的，重新生成就是把同一张图再发一次，不用回滚任何东西
     image: { previewUrl: att.previewUrl, name: att.name },
     file: att.file,
-    turn,
+    turn: 0,
   })
   chatList.value.push({
     id: genId(),
@@ -851,9 +1063,11 @@ const sendVisionMessage = async () => {
     pending: true,
     done: false,
     failed: '',
-    turn,
+    turn: 0,
     thinking: '',
   })
+  // 给这一轮编号(看图说话的轮次单独数,见 renumberTurns)
+  renumberTurns()
   // ⚠️ 必须在**推完回复消息之后**再算下标 ——
   //    早一行的话这个下标指向的是用户消息，模型的回答会写进用户气泡里，
   //    而真正的回复气泡一直停在「正在思考…」(done 永远是 false，操作栏不出现)。
@@ -1063,6 +1277,9 @@ onMounted(async () => {
   // ⚠️ 工具清单不在这里拉 —— Layout 挂载时拉一次就够了(整个应用共用一份)。
   //    这里再拉一次会用 localStorage 里的旧值覆盖用户刚在页面上做的勾选。
 
+  // 盯内容高度:Markdown 渲染完高度会再变一次,得重新贴底(见 watchContentHeight)
+  watchContentHeight()
+
   await loadHistory()
   await consumeHandoff()
 })
@@ -1073,6 +1290,8 @@ onBeforeUnmount(() => {
   // ⚠️ 走 fetch 的那条链路不会自动断,得手动 abort ——
   //    否则组件没了请求还在跑,白白烧后端的 token
   visionController?.abort()
+  // 高度观察器也得撤 —— 不然组件没了它还在回调
+  contentObserver?.disconnect()
   // object URL 的回收在 useAttachment 里(它自己记着自己创建过哪些)
 })
 

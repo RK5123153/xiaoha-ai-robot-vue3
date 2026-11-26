@@ -57,3 +57,72 @@ export const turnIndexOf = (chatList, messageId) => {
   const msg = chatList.find((c) => c.id === messageId)
   return msg?.turn ?? 0
 }
+
+/**
+ * 窗口前面还压着几轮 —— 也就是「窗口里最早那条之前有多少轮」
+ *
+ * <p>历史消息是**分页加载**的：打开会话先拿最新的一页，用户往上一滑才加载更早的。
+ * 而「第 k 轮」必须是从**会话开头**数起的（反馈上报拿 turnIndex 当定位标识），
+ * 所以光数窗口里有几条提问是不够的 —— 还得知道窗口前面压着多少轮。
+ *
+ * <p>那个数 = 后端报的总轮数 - 窗口里已经归档的部分。
+ *
+ * @param {number} totalTurns       这个会话一共多少轮（后端数的；0 = 不知道）
+ * @param {number} archivedInWindow 窗口里已归档的提问条数
+ * @returns {number} 偏移量；总轮数不知道时是 0（轮次号退化成相对值）
+ */
+export const baseTurnOf = (totalTurns, archivedInWindow) => {
+  if (!totalTurns) return 0
+  return Math.max(0, totalTurns - archivedInWindow)
+}
+
+/**
+ * 给窗口里的所有消息编号「第几轮」
+ *
+ * <p>轮次的定义：从**会话开头**数起的提问条数 ——
+ *    第 k 条提问 + 第 k 条回答 = 第 k 轮（回答的轮次 = 它上面那条提问的轮次）。
+ *
+ * <p>⚠️ 为什么要整个窗口一起数，而不是每条消息各自算：
+ *    窗口是分页加载出来的，会变（往上翻一页、或者本地发了一条新的），
+ *    各自算的话前后对不上。统一从 baseTurn 往后数才对得上。
+ *
+ * <p>⚠️ 翻页的边界可能把「提问」和「回答」切在两页里：
+ *    这时那条回答的提问还在没加载的那页，轮次照样对得上
+ *    （baseTurn 已经是那页之前压着的轮次数）。
+ *
+ * <p>⚠️ 看图说话**单独编号**：它是无状态的，不走后端的聊天记忆，
+ *    反馈上报时用的是自己的 chatId，轮次号也各数各的。
+ *
+ * @param {Array<{role: string, kind?: string}>} list 聊天记录（就地改 turn 字段）
+ * @param {number} [baseTurn] 窗口前面压着几轮
+ * @returns {Array<object>} 传进来的那份 list
+ */
+export const assignTurns = (list, baseTurn = 0) => {
+  if (!Array.isArray(list)) return list
+  let textTurn = baseTurn
+  let visionTurn = 0
+  for (const c of list) {
+    if (!c) continue
+    if ((c.kind ?? 'text') === 'vision') {
+      if (c.role === 'user') visionTurn += 1
+      c.turn = visionTurn
+    } else if (c.role === 'user') {
+      textTurn += 1
+      c.turn = textTurn
+    } else {
+      // 回答的轮次 = 它上面那条提问的轮次（此刻数到的提问数就是它）；
+      // 问候语前面没有提问，baseTurn=0 时它的轮次也是 0
+      c.turn = textTurn
+    }
+  }
+  return list
+}
+
+/**
+ * 数一页后端消息里有几条提问（= 几轮）
+ *
+ * @param {Array<{role: string}>} list 后端的消息数组
+ * @returns {number}
+ */
+export const countUserTurns = (list) =>
+  (Array.isArray(list) ? list : []).filter((m) => m && m.role === 'user').length

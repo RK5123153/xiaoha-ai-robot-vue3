@@ -1,5 +1,5 @@
 /**
- * 会话(对话)的接口 —— 新栈 /chat/** + /v13/**
+ * 会话(对话)的接口 —— 新栈 /chat/**
  *
  * <p>页面的「左边栏」和「主内容区」都靠这组接口:
  *    左边栏列会话、点会话进主内容区、主内容区发消息/读历史。
@@ -13,7 +13,6 @@
 import {
   API_BASE,
   fetchWithTimeout,
-  getJson,
   postJson,
   query,
   unwrap,
@@ -22,9 +21,6 @@ import { streamSse } from '@/utils/sse.js'
 
 /** 新栈:会话管理 —— /chat/** */
 const CONVERSATION_BASE = `${API_BASE}/chat`
-
-/** 新栈:会话历史 —— /v13/** */
-const V13_BASE = `${API_BASE}/v13`
 
 export const conversationApi = {
   /**
@@ -96,18 +92,25 @@ export const conversationApi = {
   },
 
   /**
-   * 某个会话的消息历史(游标翻页,按时间正序)
+   * 某个会话的消息历史(游标翻页,**从最新往回翻**)
    *
-   * <p>⚠️ 这个接口是**正序**的:第一页给的是**最早**的消息。
-   *    页面要显示的是「最近聊了什么」,所以开页面时用
-   *    {@link conversationApi.history} 一次性拿全量,而不是用这个。
-   *    这个留着给「往前翻更多消息」用。
+   * <p>⚠️ 翻页方向和「页码分页」的直觉相反,这是后端定的:
+   *   <ul>
+   *     <li>不传 cursor → 拿到的是**最新**的一页(页内按时间正序:先问后答);</li>
+   *     <li>把 nextCursor 原样传回来 → 拿到的是**更早**的一页;</li>
+   *     <li>hasMore=false → 已经翻到头了(会话最开始)。</li>
+   *   </ul>
+   *   前端就是按这个来的:打开会话先显示「最近聊了什么」,
+   *   用户往上一滑才去加载更早的(见 ChatPage.vue 的 loadOlderHistory)。
+   *
+   * <p>⚠️ 游标不能改 —— 改坏了后端会 400(而不是当成「没传」),
+   *    那样前端会拿到最新的一页却以为那是下一页,历史直接重复。
    *
    * @param {object} params
    * @param {string} params.chatId 会话 uuid
-   * @param {number} [params.size]
-   * @param {string} [params.cursor]
-   * @returns {Promise<{items: Array<object>, hasMore: boolean, nextCursor: string}>}
+   * @param {number} [params.size] 一页多少条(后端限制 1~100)
+   * @param {string} [params.cursor] 上一页返回的 nextCursor;第一页不传
+   * @returns {Promise<{items: Array<object>, hasMore: boolean, nextCursor: string, totalTurns: number}>}
    */
   async messages({ chatId, size = 20, cursor = '' }) {
     const payload = await postJson(`${CONVERSATION_BASE}/message/list`, {
@@ -120,23 +123,10 @@ export const conversationApi = {
       items: Array.isArray(data) ? data : [],
       hasMore: !!payload.hasMore,
       nextCursor: payload.nextCursor || '',
+      // 这个会话一共多少轮(= 归档里 user 消息的条数)。
+      // ⚠️ 老后端没这个字段 → 0,前端按「不知道总数」处理(轮次号变成相对的)。
+      totalTurns: typeof payload.totalTurns === 'number' ? payload.totalTurns : 0,
     }
-  },
-
-  /**
-   * 某个会话的完整消息历史(不分页)
-   *
-   * <p>页面打开一个会话时用这个:一次拿全量,直接铺到聊天区。
-   * 消息很多的时候流量会大,但比「翻到最后一页」省事得多。
-   *
-   * @param {object} params
-   * @param {string} params.uuid 会话 uuid
-   * @returns {Promise<Array<object>>} 消息数组(按时间正序)
-   */
-  async history({ uuid }) {
-    const payload = await getJson(`${V13_BASE}/chats/${encodeURIComponent(uuid)}`)
-    const data = unwrap(payload)
-    return Array.isArray(data) ? data : []
   },
 
   /**
