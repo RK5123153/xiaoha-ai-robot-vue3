@@ -150,6 +150,7 @@
               :key="item.uuid"
               :chat="item"
               :active="item.uuid === activeUuid"
+              :busy="pending.has(item.uuid)"
               @select="openChat"
               @rename="doRename"
               @delete="doDelete"
@@ -185,9 +186,11 @@
 </template>
 
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRoute, useRouter } from 'vue-router'
+// 这里给 message 起别名:页面里已经有叫 message 的变量(输入框的草稿)
+import { message as antMessage } from 'ant-design-vue'
 import ChatListItem from '@/components/ChatListItem.vue'
 import BrandLogo from '@/components/BrandLogo.vue'
 import { useSessionStore } from '@/stores/sessions.js'
@@ -336,17 +339,67 @@ watch(
 )
 
 /**
+ * 正在飞着的请求(按会话 uuid 记)
+ *
+ * <p>⚠️ 为什么要记:改名/删除都要等后端回来,这段时间里那一行得锁住。
+ *    不锁的话,连点两下「删除」会发两个请求 —— 第一个成功、第二个必然 404,
+ *    用户看到的是「删除成功」紧跟着一条「会话不存在」的报错,一脸懵。
+ *
+ * <p>用 reactive 的 Set:Vue 3 的集合代理会跟踪 has()/add()/delete(),
+ *    模板里 pending.has(uuid) 跟着变。
+ */
+const pending = reactive(new Set())
+
+/**
+ * 把异常翻译成一句能给人看的原因
+ *
+ * <p>后端给的错误体是 Spring 的形状,原因在 message 里(base.js 已经挖出来了),
+ *    直接显示即可。
+ *
+ * <p>⚠️ 但**网络层的错误是英文的**:后端没起来时,原生 fetch 抛的是
+ *    "Failed to fetch"(Chrome)/ "Load failed"(Safari)——
+ *    「后端没起来」恰恰是最常见的失败,却只能甩一句英文给用户。
+ *    这类一律换成中文。
+ *
+ * <p>⚠️ 同理还有代理给的 502/503/504:那是「代理连不上后端」,
+ *    翻译过来是同一件事 —— 后端没在跑。
+ *
+ * @param {unknown} e
+ * @param {string} fallback 后端不可达时的兜底文案
+ * @returns {string}
+ */
+const reasonOf = (e, fallback) => {
+  const msg = String(e?.message || '')
+  if (!msg) return fallback
+  const unreachable =
+    /failed to fetch|load failed|networkerror|network request failed/i.test(msg) ||
+    /HTTP (502|503|504)\b/.test(msg)
+  if (unreachable) return `${fallback},请检查后端服务是否在运行`
+  return msg
+}
+
+/**
  * 改名
  *
- * <p>失败(比如标题超长、后端报错)时把列表重新拉一遍 ——
+ * <p>失败(标题超长、会话不存在、后端挂了)时把列表重新拉一遍 ——
  *    后端没改成的话,列表里还留着旧标题,重新拉一次能对上真实状态。
+ *
+ * <p>⚠️ 失败**必须让用户知道**:只写 console 的话,
+ *    用户看着输入框收起、标题变回原样,会以为改名成功了。
  */
-const doRename = async (id, summary) => {
+const doRename = async ({ id, uuid, summary }) => {
+  if (pending.has(uuid)) return
+  pending.add(uuid)
   try {
     await sessionStore.renameChat(id, summary)
+    // 成功不弹提示:标题就在用户眼皮底下变了,那是最好的反馈。
+    // (失败才需要提示 —— 失败时页面上**什么也没变**)
   } catch (e) {
-    console.error('改名失败: ', e)
+    antMessage.error(reasonOf(e, '重命名失败'))
+    // 后端可能其实改成功了(比如响应在路上断了)→ 重新拉一遍,以列表为准
     sessionStore.loadChats({ reset: true })
+  } finally {
+    pending.delete(uuid)
   }
 }
 
@@ -354,16 +407,27 @@ const doRename = async (id, summary) => {
  * 删掉一个会话
  *
  * <p>删的就是当前打开的那个 → 回首页,不然主内容区会停在一个已经不存在的会话上。
+ *
+ * <p>⚠️ 删除是**硬删**(后端把会话行、消息、记忆窗口全清掉),不可撤销 ——
+ *    所以成功要给一句明确的「删掉了」,失败更要说清楚为什么没删掉。
  */
 const doDelete = async (uuid) => {
+  if (pending.has(uuid)) return
+  pending.add(uuid)
   try {
     const ok = await sessionStore.removeChat(uuid)
-    if (!ok) return
+    if (!ok) {
+      antMessage.error('删除失败:会话可能已经被删掉了')
+      return
+    }
+    antMessage.success('已删除')
     if (uuid === activeUuid.value) {
       router.push({ name: 'home' })
     }
   } catch (e) {
-    console.error('删除失败: ', e)
+    antMessage.error(reasonOf(e, '删除失败'))
+  } finally {
+    pending.delete(uuid)
   }
 }
 </script>
