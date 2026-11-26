@@ -110,22 +110,8 @@
           />
         </div>
 
-        <!-- 工具开关：勾上的工具才会发给模型（tools=datetime,amap）
-             只有文字对话有：看图说话那条路(/v9)后端不接工具
-             ⚠️ 没勾的工具 AI 根本看不到 —— 它会直接说「我没有联网搜索的能力」 -->
-        <div v-if="mode === 'text' && toolList.length" class="tool-bar mb-2">
-          <span class="tool-bar-label" title="勾上的工具会交给 AI 调用(联网搜索、查天气、查 QQ 信息…)">工具</span>
-          <button
-            v-for="t in toolList"
-            :key="t.name"
-            type="button"
-            class="tool-chip"
-            :class="{ 'is-on': selectedTools.includes(t.name), 'is-off': t.available === false }"
-            :title="t.available === false ? (t.unavailableReason || t.description) : t.description"
-            :disabled="t.available === false"
-            @click="toggleTool(t.name)"
-          >{{ t.label || t.name }}</button>
-        </div>
+        <!-- 工具开关:抽成组件了 —— 首页的输入框下面也有一份,状态是同一份 -->
+        <ToolBar v-if="mode === 'text'" />
 
         <!-- 看图说话模式的提示：把「无状态」这件事说在前面，别让用户误以为模型记得上一张图 -->
         <p v-if="mode === 'vision'" class="hint mb-1.5">
@@ -162,7 +148,7 @@
           </button>
         </div>
       </div>
-      <div class="flex items-center justify-center text-xs text-gray-400 mt-2">内容由 AI 生成，请仔细甄别</div>
+      <DisclaimerBar />
       </div>
     </div>
 
@@ -190,7 +176,9 @@ import { lastRegenerableId, turnIndexOf as turnIndexOfMessage } from '@/utils/ch
 import { chatApi, conversationApi } from '@/utils/api.js'
 import { prepareImage, isImageFile } from '@/utils/image.js'
 import { sendVisionStream, DEFAULT_QUESTION } from '@/utils/vision.js'
-import { handoff, loadChats, modelState } from '@/utils/chat-store.js'
+import { handoff, loadChats, modelState, toolsParam } from '@/utils/chat-store.js'
+import ToolBar from '@/components/ToolBar.vue'
+import DisclaimerBar from '@/components/DisclaimerBar.vue'
 
 const route = useRoute()
 
@@ -214,92 +202,7 @@ const chatId = computed(() => route.params?.uuid || '')
 /** 历史消息加载中 */
 const loadingHistory = ref(false)
 
-/* ──────────────────────────────────────────────────────────────────────
- * 工具开关
- * ────────────────────────────────────────────────────────────────────── */
-
-/**
- * 可用工具 —— 后端 /v2/ai/tools 列出来的
- *
- * <p>为什么要这一层:模型自己不知道「今天是几号」,得有个工具替它查
- * (后端的工具调用能力)。但工具不是全都默认开着 ——
- * 每个工具的定义都要占 token,而且开多了模型会动不动就调,
- * 所以由用户按需勾选,勾了才发给模型(tools=datetime,amap)。
- *
- * <p>清单和默认勾选状态**都来自后端**,前端不写死:
- * 后端加工具 → 前端自动多一个按钮,前端零改动。
- */
-const toolList = ref([])
-
-/** 勾选中的工具短名 */
-const selectedTools = ref([])
-
-/** 清单拿到了没 —— 没拿到(旧后端 / 网络不通)就不发 tools 参数,走后端默认 */
-const toolsLoaded = ref(false)
-
-/**
- * 勾选状态存在 localStorage 里 —— **刷新/换标签页都不能丢**
- *
- * <p>为什么必须存:工具没勾上 = 模型压根看不到这个工具,会直接说
- * 「我没有联网搜索 GitHub 的能力」然后凭记忆瞎答(用户就是这么发现的)。
- * 而勾选一次就刷新页面没了,等于每次都要重新勾 —— 谁记得住。
- */
-const TOOLS_STORAGE_KEY = 'xiaoha-ai-robot.tools'
-
-/**
- * 本次请求要带的 tools 参数
- *
- * <p>⚠️ 「一个都没勾」和「不传」是两回事:
- * 不传 = 用后端配置的默认工具(datetime);一个都没勾 = 明确全部关掉(后端认 none)。
- * 混起来的话,用户把工具全关了却还在用默认工具,就会觉得「关不掉」。
- */
-const toolsParam = computed(() => {
-  if (!toolsLoaded.value) return ''
-  return selectedTools.value.length ? selectedTools.value.join(',') : 'none'
-})
-
-/** 拉工具清单:优先用上次勾选的,没有才用后端说的「默认开启」 */
-const loadTools = async () => {
-  const list = await chatApi.tools()
-  toolList.value = list
-
-  let saved = null
-  try {
-    saved = JSON.parse(localStorage.getItem(TOOLS_STORAGE_KEY) || 'null')
-  } catch {
-    saved = null // 存坏了(手动改过)→ 当作没有,走默认
-  }
-  const known = new Set(list.filter((t) => t.available !== false).map((t) => t.name))
-  if (Array.isArray(saved)) {
-    // 只保留后端还认识的工具(后端升级后可能删了某个工具)
-    // ⚠️ 还要滤掉「后端说不可用」的:它们没发给模型,勾上会让后端直接 400
-    selectedTools.value = saved.filter((n) => known.has(n))
-  } else {
-    selectedTools.value = list
-      .filter((t) => t.available !== false && t.defaultEnabled)
-      .map((t) => t.name)
-  }
-  toolsLoaded.value = list.length > 0
-}
-
-/** 勾/取消一个工具(并记住) */
-const toggleTool = (name) => {
-  // 不可用的工具不让勾 —— 后端没把它发给模型,勾了只会让请求 400
-  const tool = toolList.value.find((t) => t.name === name)
-  if (tool && tool.available === false) return
-  const i = selectedTools.value.indexOf(name)
-  if (i === -1) {
-    selectedTools.value = [...selectedTools.value, name]
-  } else {
-    selectedTools.value = selectedTools.value.filter((n) => n !== name)
-  }
-  try {
-    localStorage.setItem(TOOLS_STORAGE_KEY, JSON.stringify(selectedTools.value))
-  } catch {
-    // 隐私模式下 localStorage 可能不可写 → 忽略,只是这次不记住而已
-  }
-}
-
+/* 工具开关的状态在 store 里(utils/chat-store.js):首页和聊天页共用同一份勾选。 */
 /* ──────────────────────────────────────────────────────────────────────
  * 输入框
  * ────────────────────────────────────────────────────────────────────── */
@@ -1189,8 +1092,8 @@ const switchMode = (next) => {
 onMounted(async () => {
   autoResize()
   textareaRef.value?.focus()
-  // 拉工具清单(拉不到也不影响聊天:不传 tools 参数,后端用默认工具)
-  loadTools()
+  // ⚠️ 工具清单不在这里拉 —— Layout 挂载时拉一次就够了(整个应用共用一份)。
+  //    这里再拉一次会用 localStorage 里的旧值覆盖用户刚在页面上做的勾选。
   window.addEventListener('keydown', handlePreviewKeydown)
 
   await loadHistory()
@@ -1263,54 +1166,6 @@ watch(
 }
 
 /* ---------- 工具开关 ---------- */
-.tool-bar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.tool-bar-label {
-  font-size: 12px;
-  color: #9ca3af;
-}
-
-/* 未勾选 = 灰底;勾上 = 主色,一眼能看出「这次会带哪些工具」 */
-.tool-chip {
-  padding: 3px 10px;
-  border-radius: 9999px;
-  font-size: 12px;
-  line-height: 18px;
-  color: #6b7280;
-  background: #fff;
-  border: 1px solid #e5e7eb;
-  cursor: pointer;
-  transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
-}
-
-.tool-chip:hover {
-  border-color: #4d6bfe;
-  color: #4d6bfe;
-}
-
-.tool-chip.is-on {
-  color: #fff;
-  background: #4d6bfe;
-  border-color: #4d6bfe;
-}
-
-/* 不可用的工具(比如 GitHub 没配 PAT):灰着、点不动 —— 鼠标悬停能看到原因 */
-.tool-chip.is-off {
-  color: #9ca3af;
-  background: #f9fafb;
-  border-color: #e5e7eb;
-  cursor: not-allowed;
-}
-
-.tool-chip.is-off:hover {
-  border-color: #e5e7eb;
-  color: #9ca3af;
-}
 
 /* ---------- 看图说话 ---------- */
 /* 拖拽悬停：告诉用户「可以放这儿」 */

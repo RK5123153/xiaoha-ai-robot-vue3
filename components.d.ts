@@ -23,6 +23,7 @@ declare module 'vue' {
     CloseOutlined: typeof import('@ant-design/icons-vue')['CloseOutlined']
     CopyOutlined: typeof import('@ant-design/icons-vue')['CopyOutlined']
     DeleteOutlined: typeof import('@ant-design/icons-vue')['DeleteOutlined']
+    DisclaimerBar: typeof import('./src/components/DisclaimerBar.vue')['default']
     DislikeFilled: typeof import('@ant-design/icons-vue')['DislikeFilled']
     DislikeOutlined: typeof import('@ant-design/icons-vue')['DislikeOutlined']
     EditOutlined: typeof import('@ant-design/icons-vue')['EditOutlined']
@@ -43,5 +44,6 @@ declare module 'vue' {
     Sidebar: typeof import('./src/components/Sidebar.vue')['default']
     SoundOutlined: typeof import('@ant-design/icons-vue')['SoundOutlined']
     StreamMarkdownRender: typeof import('./src/components/StreamMarkdownRender.vue')['default']
+    ToolBar: typeof import('./src/components/ToolBar.vue')['default']
   }
 }

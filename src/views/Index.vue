@@ -55,6 +55,13 @@
             />
           </div>
 
+          <!--
+            工具开关:和聊天页是同一份勾选(存在 store 里)。
+            ⚠️ 首页原来**没有**这一排,于是首页的推荐问题写着「需要勾选天气工具」,
+               可页面上根本没那个开关 —— 用户点了才发现工具没开,AI 只能瞎答。
+          -->
+          <ToolBar />
+
           <textarea
             v-model="message"
             placeholder="给小哈 AI 机器人发送消息（Enter 发送，Shift + Enter 换行）"
@@ -83,7 +90,7 @@
             </button>
           </div>
         </div>
-        <div class="flex items-center justify-center text-xs text-gray-400 mt-2">内容由 AI 生成，请仔细甄别</div>
+        <DisclaimerBar />
       </div>
     </div>
 
@@ -104,6 +111,8 @@ import { message as antMessage } from 'ant-design-vue'
 import BrandLogo from '@/components/BrandLogo.vue'
 import ImagePicker from '@/components/ImagePicker.vue'
 import ImageChip from '@/components/ImageChip.vue'
+import ToolBar from '@/components/ToolBar.vue'
+import DisclaimerBar from '@/components/DisclaimerBar.vue'
 import { conversationApi } from '@/utils/api.js'
 import { prepareImage, isImageFile } from '@/utils/image.js'
 import { handoff, genUuid } from '@/utils/chat-store.js'
@@ -113,9 +122,9 @@ const router = useRouter()
 /** 首页的常用问题 */
 const suggestions = [
   { title: '介绍一下你自己', desc: '看看小哈 AI 能做什么' },
-  { title: '帮我查一下今天的天气', desc: '需要勾选「天气」工具' },
+  { title: '帮我查一下今天的天气', desc: '先在下面勾上「天气」工具' },
   { title: '解释一下 Vue 3 的组合式 API', desc: '技术问题随便问' },
-  { title: '在 GitHub 上找找热门的 Vue 项目', desc: '需要勾选「GitHub」工具' },
+  { title: '在 GitHub 上找找热门的 Vue 项目', desc: '先在下面勾上「GitHub」工具' },
 ]
 
 const message = ref('')

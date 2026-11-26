@@ -35,8 +35,22 @@
     <div class="w-64 h-full flex flex-col bg-[#f9fbff] border-r border-gray-200">
       <!-- 顶部:logo + 应用名 + 关闭(仅移动端) -->
       <div class="h-14 shrink-0 relative flex items-center justify-center gap-2 px-4">
-        <BrandLogo class="w-7 h-7" />
-        <span class="font-semibold text-[15px] tracking-wide text-gray-800">小哈 AI</span>
+        <!--
+          logo + 应用名 = 回首页的入口。
+          ⚠️ 做成 <button> 而不是给 <div> 加 @click:
+             div 不可聚焦 —— 键盘 Tab 不到,读屏软件也不会把它念成可点的按钮。
+        -->
+        <a-tooltip placement="bottom" title="回到首页">
+          <button
+            type="button"
+            class="flex items-center justify-center gap-2 px-2 py-1 rounded-lg
+                   cursor-pointer transition-colors hover:bg-gray-100"
+            @click="goHome"
+          >
+            <BrandLogo class="w-7 h-7" />
+            <span class="font-semibold text-[15px] tracking-wide text-gray-800">小哈 AI</span>
+          </button>
+        </a-tooltip>
         <!--
           关闭按钮绝对定位到右上角,而不是用 ml-auto 撑开 ——
           logo 那一组要**居中**,用 ml-auto 的话会被按钮推得偏左。

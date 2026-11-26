@@ -13,17 +13,25 @@
       />
     </div>
 
-    <!-- 正常状态:标题 -->
-    <button
-      v-else
-      type="button"
-      class="w-full text-left px-3 py-2 pr-12 rounded-lg text-sm truncate transition-colors"
-      :class="active ? 'bg-[#eef6ff] text-[#4d6bfe] font-medium' : 'text-gray-600 hover:bg-[#eef6ff] hover:text-gray-900'"
-      :title="chat.title"
-      @click="$emit('select', chat.uuid)"
-    >
-      {{ chat.title }}
-    </button>
+    <!--
+      正常状态:标题
+      ⚠️ 提示用 antd 的 <a-tooltip>,不用原生 title:
+         原生 title 要悬停 1 秒才弹,样式还是浏览器自带的灰方块。
+         标题被折断时用户看不到全文 —— tooltip 就是给这种情况准备的。
+         ⚠️ 别再往这个按钮上补原生 title —— title 和 a-tooltip 会**弹两次**。
+    -->
+    <a-tooltip v-else placement="top" :title="tooltipTitle">
+      <button
+        ref="titleRef"
+        type="button"
+        class="w-full text-left px-3 py-2 pr-12 rounded-lg text-sm truncate transition-colors"
+        :class="active ? 'bg-[#eef6ff] text-[#4d6bfe] font-medium' : 'text-gray-600 hover:bg-[#eef6ff] hover:text-gray-900'"
+        @mouseenter="onTitleHover"
+        @click="$emit('select', chat.uuid)"
+      >
+        {{ chat.title }}
+      </button>
+    </a-tooltip>
 
     <!--
       更多操作:一个「⋯」按钮 + 下拉菜单(重命名 / 删除)
@@ -108,6 +116,25 @@ const confirming = ref(false)
 const menuOpen = ref(false)
 const inputRef = ref(null)
 
+/** 标题那个元素(用来量它有没有被折断) */
+const titleRef = ref(null)
+/** tooltip 要显示的内容;空字符串 = 不显示 */
+const tooltipTitle = ref('')
+
+/**
+ * 鼠标划过标题时:看看它是不是被折断了
+ *
+ * <p>只有真被截断才提示 —— 短标题也弹 tooltip 是噪音
+ * (鼠标在一列会话上扫过去,弹十几次更烦)。
+ *
+ * <p>量法:scrollWidth 是内容的完整宽度(被折断时比可见宽度大),
+ * clientWidth 是可见框的宽度。两者一比就知道有没有折断。
+ */
+const onTitleHover = () => {
+  const el = titleRef.value
+  tooltipTitle.value = el && el.scrollWidth > el.clientWidth ? props.chat.title : ''
+}
+
 /**
  * 点菜单项:按 key 分发
  *
@@ -183,6 +210,8 @@ watch(
     editing.value = false
     confirming.value = false
     menuOpen.value = false
+    // 标题换了,上一次量出来的「要不要提示」也就过期了
+    tooltipTitle.value = ''
   }
 )
 </script>

@@ -75,7 +75,7 @@
 import { ref, watch, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import Sidebar from '@/components/Sidebar.vue'
-import { chatState, loadChats, loadModels } from '@/utils/chat-store.js'
+import { chatState, loadChats, loadModels, loadTools } from '@/utils/chat-store.js'
 
 const route = useRoute()
 
@@ -116,6 +116,9 @@ onMounted(() => {
   }
   loadChats({ reset: true })
   loadModels()
+  // 工具清单整个应用只拉这一次 —— 首页和聊天页共用一份勾选状态。
+  // ⚠️ 别在页面里再拉一遍:会用 localStorage 里的旧值覆盖用户刚做的勾选。
+  loadTools()
 })
 
 /**

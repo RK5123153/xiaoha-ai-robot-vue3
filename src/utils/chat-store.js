@@ -16,7 +16,7 @@
  */
 
 import { reactive, computed } from 'vue'
-import { conversationApi, modelApi } from './api.js'
+import { conversationApi, modelApi, chatApi } from './api.js'
 
 /** 会话列表 / 加载状态 */
 export const chatState = reactive({
@@ -45,6 +45,29 @@ export const modelState = reactive({
   /** 模型清单拉过了 */
   loaded: false,
 })
+
+/**
+ * 工具开关(全局)—— 输入框上面那排小标签
+ *
+ * <p>为什么从聊天页搬到这里:
+ *   <ul>
+ *     <li><b>首页也有输入框</b>,也要显示这排工具 —— 两处得是**同一份**选择
+ *         (用户在首页勾了「天气」,跳到聊天页还是勾着的,反之亦然)。</li>
+ *     <li>它本来就存在 localStorage 里,天生是跨页面的状态,
+ *         放在页面组件里等于把全局状态塞进了一个会被卸载的壳。</li>
+ *   </ul>
+ */
+export const toolState = reactive({
+  /** 后端列出来的可用工具 */
+  list: [],
+  /** 勾选中的工具短名 */
+  selected: [],
+  /** 清单拿到了没 —— 没拿到(旧后端 / 网络不通)就不发 tools 参数,走后端默认 */
+  loaded: false,
+})
+
+/** 工具勾选状态存在 localStorage 的哪个键下 */
+const TOOLS_STORAGE_KEY = 'xiaoha-ai-robot.tools'
 
 /**
  * 首页 → 聊天页 的消息交接
@@ -251,6 +274,77 @@ export const selectModel = (code) => {
   modelState.code = code || ''
   const model = modelState.models.find((m) => m.code === code)
   modelState.webSearch = !!model?.webSearch
+}
+
+/**
+ * 本次请求要带的 tools 参数
+ *
+ * <p>⚠️ 「一个都没勾」和「不传」是两回事:
+ * 不传 = 用后端配置的默认工具(datetime);一个都没勾 = 明确全部关掉(后端认 none)。
+ * 混起来的话,用户把工具全关了却还在用默认工具,就会觉得「关不掉」。
+ */
+export const toolsParam = computed(() => {
+  if (!toolState.loaded) return ''
+  return toolState.selected.length ? toolState.selected.join(',') : 'none'
+})
+
+/**
+ * 拉工具清单:优先用上次勾选的,没有才用后端说的「默认开启」
+ *
+ * <p>清单和默认勾选状态**都来自后端**,前端不写死:
+ * 后端加工具 → 前端自动多一个按钮,前端零改动。
+ *
+ * <p>⚠️ 整个应用只调一次(Layout 挂载时调)。再调一次会用 localStorage
+ * 里的旧值**覆盖**用户刚刚在页面上做的勾选 —— 那就白勾了。
+ */
+export const loadTools = async () => {
+  // 已经拉到了就别再拉:第二次会用 localStorage 里的旧值
+  // **覆盖**用户刚刚在页面上做的勾选 —— 那就白勾了。
+  if (toolState.loaded) return
+  const list = await chatApi.tools()
+  toolState.list = list
+
+  let saved = null
+  try {
+    saved = JSON.parse(localStorage.getItem(TOOLS_STORAGE_KEY) || 'null')
+  } catch {
+    saved = null // 存坏了(手动改过)→ 当作没有,走默认
+  }
+  const known = new Set(list.filter((t) => t.available !== false).map((t) => t.name))
+  if (Array.isArray(saved)) {
+    // 只保留后端还认识的工具(后端升级后可能删了某个工具)
+    // ⚠️ 还要滤掉「后端说不可用」的:它们没发给模型,勾上会让后端直接 400
+    toolState.selected = saved.filter((n) => known.has(n))
+  } else {
+    toolState.selected = list
+      .filter((t) => t.available !== false && t.defaultEnabled)
+      .map((t) => t.name)
+  }
+  toolState.loaded = list.length > 0
+}
+
+/**
+ * 勾/取消一个工具(并记住)
+ *
+ * <p>⚠️ 勾选状态存 localStorage —— **刷新/换标签页都不能丢**:
+ * 工具没勾上 = 模型压根看不到这个工具,会直接说
+ * 「我没有联网搜索 GitHub 的能力」然后凭记忆瞎答。
+ */
+export const toggleTool = (name) => {
+  // 不可用的工具不让勾 —— 后端没把它发给模型,勾了只会让请求 400
+  const tool = toolState.list.find((t) => t.name === name)
+  if (tool && tool.available === false) return
+  const i = toolState.selected.indexOf(name)
+  if (i === -1) {
+    toolState.selected = [...toolState.selected, name]
+  } else {
+    toolState.selected = toolState.selected.filter((n) => n !== name)
+  }
+  try {
+    localStorage.setItem(TOOLS_STORAGE_KEY, JSON.stringify(toolState.selected))
+  } catch {
+    // 隐私模式下 localStorage 可能不可写 → 忽略,只是这次不记住而已
+  }
 }
 
 /**
