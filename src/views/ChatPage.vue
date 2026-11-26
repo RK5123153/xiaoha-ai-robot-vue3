@@ -20,8 +20,8 @@
       @scroll="handleScroll"
     >
       <!-- 历史加载中 -->
-      <div v-if="loadingHistory" class="flex justify-center py-8">
-        <span class="inline-block w-2 h-2 rounded-full bg-gray-300 animate-pulse"></span>
+      <div v-if="loadingHistory" class="flex justify-center py-8 text-gray-400">
+        <LoadingDots size="md" label="正在加载历史消息" />
       </div>
 
       <!-- 内容限宽:宽屏上不让气泡拉成一整行(一行字太长不好读) -->
@@ -62,10 +62,27 @@
           </div>
           <!-- 回复的内容（Markdown 渲染） -->
           <div class="w-full max-w-[80%] mb-2">
-            <!-- 思考态提示：后端把推理过程放在 event:thinking 里，出正文前先给个反馈 -->
-            <div v-if="chat.pending" class="flex items-center gap-2 text-sm text-gray-400 mb-1">
-              <span class="inline-block w-1.5 h-1.5 rounded-full bg-gray-400 animate-pulse"></span>
-              <span>正在思考…</span>
+            <!--
+              等待模型回答时的进度显示。
+
+              ⚠️ 为什么要把思考链显示出来:
+                 后端等模型开口的这段时间可能很长(要先调工具:天气/联网搜索,
+                 实测 MCP 工具挂住能到一两分钟),这期间 SSE **一个字节都不发** ——
+                 光一个「正在思考…」,用户只会以为页面卡死了。
+                 而后端**一直在流思考链**(event: thinking),里面写着它在干什么。
+                 把它显示出来,这段等待就有了内容。
+
+              ⚠️ 思考链**不混进正文**:它是模型的内部推理(还可能是英文的),
+                 单独一块、灰字、小字;正文那块保持干净。
+            -->
+            <ThinkingPanel v-if="chat.pending && chat.thinking" :text="chat.thinking" />
+            <!-- 没有思考链的模型(不给 reasoning)→ 至少给个转圈 -->
+            <div
+              v-else-if="chat.pending"
+              class="flex items-center gap-2 text-sm text-gray-400 mb-1"
+            >
+              <LoadingDots size="sm" label="正在思考" />
+              <span aria-hidden="true">正在思考…</span>
             </div>
             <!-- 后端存下来的「被打断」的回答：正文是残缺的,标一下免得以为模型就答这么多 -->
             <p
@@ -115,6 +132,7 @@
           :send-disabled="sendState.disabled"
           :send-hint="sendState.hint"
           :streaming="isSending"
+          :loading="loadingHistory"
           :vision="!!attachment"
           placeholder="给小哈 AI 机器人发送消息（Enter 发送，Shift + Enter 换行）"
           :hint="attachment ? '看图问答：本次不带聊天记忆，回答也不写入会话历史' : ''"
@@ -140,6 +158,8 @@ import { useRoute } from 'vue-router'
 // 这里起别名:页面里已经有叫 message 的变量(输入框的草稿)
 import { message as antMessage } from 'ant-design-vue'
 import StreamMarkdownRender from '@/components/StreamMarkdownRender.vue'
+import LoadingDots from '@/components/LoadingDots.vue'
+import ThinkingPanel from '@/components/ThinkingPanel.vue'
 import MessageActions from '@/components/MessageActions.vue'
 import BrandLogo from '@/components/BrandLogo.vue'
 import ChatInputBox from '@/components/ChatInputBox.vue'
@@ -294,9 +314,15 @@ const regenerableIdOf = (chat) =>
  * 只盯最后一条，不对整个 chatList 做 deep watch ——
  * 长对话下每来一个流式分片就深遍历全量历史，开销随对话长度线性增长。
  * flush: 'post' 保证 DOM 已经更新完再量 scrollHeight。
+ *
+ * ⚠️ 思考链也算:等模型开口的时候页面上唯一在变的就是它,
+ *    不跟着滚的话用户盯着的是半截不动的内容,更以为卡死了。
  */
 watch(
-  () => chatList.value[chatList.value.length - 1]?.content,
+  () => {
+    const last = chatList.value[chatList.value.length - 1]
+    return `${last?.content || ''}\u0000${last?.thinking || ''}`
+  },
   () => scrollToBottom(),
   { flush: 'post' }
 )
@@ -481,6 +507,27 @@ const handleStop = () => {
 }
 
 /**
+ * 思考链最多留多长(字)
+ *
+ * <p>⚠️ 思考链可能很长(实测一两千字),全留着气泡会越来越重;
+ *    而且有用的是**最后**那几段(它在说什么、准备干什么),
+ *    所以超长就从**前面**截掉。
+ */
+const THINKING_MAX = 4000
+
+/**
+ * 攒思考链
+ *
+ * @param {string} current 已有的思考链
+ * @param {string} add     新来的一段
+ * @returns {string} 新的思考链
+ */
+const appendThinking = (current, add) => {
+  const next = (current || '') + (add || '')
+  return next.length > THINKING_MAX ? next.slice(next.length - THINKING_MAX) : next
+}
+
+/**
  * 发起一次流式请求，把正文写进第 replyIndex 条消息
  *
  * 单独抽出来是因为「发送」和「重新生成」共用同一套流式逻辑 ——
@@ -541,11 +588,21 @@ const startStream = async (userMessage, replyIndex) => {
         if (event === 'message') {
           responseText += payload
           target.content = responseText
-          target.pending = false
+          // ⚠️ **收到分片 ≠ 出正文了**:
+          //    有些模型第一帧只丢一个换行/一个空格过来。不看内容就撤掉加载动画的话,
+          //    屏幕上会空出一段「动画没了、字也没有」的时间 —— 比一直转着更像卡死。
+          //    真正有没有东西给用户看,看累积的正文是不是空的。
+          target.pending = !responseText.trim()
         } else if (event === 'thinking') {
-          // 思考链:只用它维持「正在思考…」提示,不渲染进正文,避免污染最终回答。
+          // 思考链:**不渲染进正文**(它是模型的内部推理,混进去会污染最终回答),
+          // 但要攒起来单独显示 —— 等模型开口可能很久(要先调工具),
+          // 这期间后端 SSE 一个字节都不发,只转圈用户会以为卡死了;
+          // 思考链里写着它在干什么(「我先并行查询北京、上海…」),那才是有用的等待反馈。
           // 正文已经开始输出后就不再退回「正在思考」状态
-          if (!responseText) target.pending = true
+          if (!responseText) {
+            target.pending = true
+            target.thinking = appendThinking(target.thinking, payload)
+          }
         } else if (event === 'error') {
           serverError = payload
           // ⚠️ 原因要**记在气泡上**,不能只在「内容为空」时才显示 ——
@@ -628,10 +685,14 @@ const runVisionRequest = async (file, question, replyIndex) => {
       message: question,
       model: visionModel,
       signal: controller.signal,
-      onThinking: () => {
+      onThinking: (text) => {
         // 正文还没出来时维持「正在思考…」;出正文了就撤掉
+        // ⚠️ 思考链也要攒起来单独显示(同文字对话那条链路)
         const target = reply()
-        if (target && !target.content) target.pending = true
+        if (target && !target.content) {
+          target.pending = true
+          target.thinking = appendThinking(target.thinking, text)
+        }
       },
       onServerError: (reason) => {
         serverError = reason
@@ -643,7 +704,9 @@ const runVisionRequest = async (file, question, replyIndex) => {
         const target = reply()
         if (!target) return
         target.content = all
-        target.pending = false
+        // ⚠️ 同文字对话:空分片不算「出正文了」,加载动画要继续转
+        //    (不然会空出一段「动画没了、字也没有」的时间)
+        target.pending = !all.trim()
       },
     })
     // 流正常结束却一个字都没有 → 给个能看的提示，别留个空气泡
@@ -738,7 +801,7 @@ const sendTextMessage = async () => {
   //   ⚠️ 只数**文字**消息：后端的记忆里只有文字轮次，
   //      把看图说话的提问也数进去会跟后端对不上（反馈的 turnIndex 会指错）
   const turn = chatList.value.filter((c) => c.role === 'user' && (c.kind ?? 'text') === 'text').length
-  chatList.value.push({ id: genId(), role: 'assistant', kind: 'text', content: '', pending: true, done: false, failed: '', turn })
+  chatList.value.push({ id: genId(), role: 'assistant', kind: 'text', content: '', pending: true, done: false, failed: '', turn, thinking: '' })
   const replyIndex = chatList.value.length - 1
 
   // 清空输入框(高度会自己收回去 —— 输入框组件盯着内容变化)
@@ -789,6 +852,7 @@ const sendVisionMessage = async () => {
     done: false,
     failed: '',
     turn,
+    thinking: '',
   })
   // ⚠️ 必须在**推完回复消息之后**再算下标 ——
   //    早一行的话这个下标指向的是用户消息，模型的回答会写进用户气泡里，
@@ -868,6 +932,7 @@ const regenerateText = async (idx) => {
     target.interrupted = false
     target.stopped = false // ⚠️ 上一轮的「已停止」标记也要清掉
     target.failed = '' // ⚠️ 上一轮的失败标记要清掉,不然重试时那个错误还挂在下面
+    target.thinking = '' // ⚠️ 上一轮的思考链也要清掉,不然两轮的思考混在一起看
     scrollToBottom(true)
 
     await startStream(question.content, idx)
@@ -896,6 +961,7 @@ const regenerateVision = async (idx) => {
   target.done = false
   target.stopped = false // ⚠️ 上一轮的「已停止」标记也要清掉
   target.failed = '' // ⚠️ 上一轮的失败标记要清掉,不然重试时那个错误还挂在下面
+  target.thinking = '' // ⚠️ 上一轮的思考链也要清掉,不然两轮的思考混在一起看
   scrollToBottom(true)
 
   await runVisionRequest(question.file, question.content, idx)

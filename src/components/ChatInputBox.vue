@@ -97,11 +97,22 @@
             type="button"
             @click="streaming ? onStop() : onSend()"
             :aria-disabled="!streaming && sendDisabled"
+            :aria-busy="loading || undefined"
             :aria-label="streaming ? '停止生成' : '发送消息'"
             class="send-btn"
           >
             <!-- 停止:一个实心小方块 -->
             <span v-if="streaming" class="block w-2.5 h-2.5 rounded-[2px] bg-white"></span>
+            <!--
+              请求在飞:按钮里转圈。
+              ⚠️ 光把按钮变灰不够 —— 用户分不清「正在跑」还是「卡死了」,
+                 鼠标悬停的 Tooltip 又要等他自己去发现,一个转圈就说明一切。
+
+              ⚠️ 用 aria-busy 表达「正在忙」,**别改 aria-label**:
+                 按钮的名字中途换来换去,读屏用户会以为换了个按钮;
+                 「还是那个发送按钮,只是正忙着」才是准确的说法。
+            -->
+            <LoadingOutlined v-else-if="loading" class="text-xl" spin />
             <ArrowUpOutlined v-else class="text-xl" />
           </button>
         </a-tooltip>
@@ -182,6 +193,17 @@ const props = defineProps({
   },
   /** 正在流式输出(发送按钮变成「停止」) */
   streaming: {
+    type: Boolean,
+    default: false,
+  },
+  /**
+   * 有请求在飞(发送按钮里转圈)
+   *
+   * <p>⚠️ 和 streaming 是**两件事**,别混:
+   *    streaming = 模型已经在吐字了,按钮是「停止」(按了能掐断);
+   *    loading   = 请求刚发出去、还没开张,按了也没用(它已经在路上了)。
+   */
+  loading: {
     type: Boolean,
     default: false,
   },

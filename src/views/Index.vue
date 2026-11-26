@@ -51,6 +51,7 @@
           :busy="preparingImage"
           :send-disabled="sendState.disabled"
           :send-hint="sendState.hint"
+          :loading="sending"
           :vision="!!attachment"
           placeholder="给小哈 AI 机器人发送消息（Enter 发送，Shift + Enter 换行）"
           :hint="attachment ? '看图问答：本次不带聊天记忆，回答也不写入会话历史' : ''"
