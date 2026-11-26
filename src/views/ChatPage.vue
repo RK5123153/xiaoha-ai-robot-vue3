@@ -48,7 +48,8 @@
       <!-- 遍历聊天记录 -->
       <template v-for="chat in chatList" :key="chat.id">
         <!-- 用户提问消息（靠右） -->
-        <div v-if="chat.role === 'user'" class="flex justify-end mb-4">
+        <!-- data-msg:滚动锚定要找「用户正看着的那条消息」——脚本里用它定位(见 pinTopMessage) -->
+        <div v-if="chat.role === 'user'" data-msg class="flex justify-end mb-4">
           <div class="quesiton-container">
             <!-- 看图说话：图在文字上面，点一下能放大 -->
             <img
@@ -71,7 +72,7 @@
         </div>
 
         <!-- 大模型回复消息（靠左） -->
-        <div v-else class="flex items-start mb-4">
+        <div v-else data-msg class="flex items-start mb-4">
           <!--
             头像:小一点、去掉那圈描边。
             参考图里助手的消息是不带气泡的,标识越轻越好 —— 一圈描边反而抢眼。
@@ -294,6 +295,10 @@ const handleScroll = () => {
     // 距底部 24px 以内视为贴底（留一点余量，避免滚动条本身造成抖动）
     stickToBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight <= 24
     lastScrollTop = el.scrollTop
+    // ⚠️ 用户又回到底部了 → 交回控制权:
+    //    「钉住」只是为了翻页那会儿稳住视口,一直钉着的话
+    //    后面新消息冒出来就贴不上底了
+    if (stickToBottom.value) pinnedEl = null
   }
   // ⚠️ 滑到顶部了就往上翻一页(更早的消息)。
   //    这里不判「是不是用户滑的」:prepend 完把滚动位置挪回去也会触发 scroll 事件,
@@ -332,6 +337,53 @@ const scrollToBottom = async (force = false) => {
 let contentObserver = null
 /** 上一次看到的内容高度(判断「长高之前贴不贴底」用的) */
 let lastContentHeight = 0
+
+/**
+ * 钉住的那条消息(往上翻页时用来稳住视口)
+ *
+ * <p>⚠️ 为什么要钉住「元素」而不是「像素偏移」:
+ *   新加载的那一页里 Markdown 是**异步渲染**的 —— 挪位置那一刻它还没渲染完,
+ *   按像素偏移算一次,等它渲染完内容再长高一截,用户正看着的那条消息
+ *   就被顶出屏幕了(实测:翻到第 2 页时它跑出了 864px)。
+ *   钉住元素就不会:每次高度变了,把它挪回原位。
+ *
+ * <p>浏览器自带的 scroll anchoring 在这儿指望不上 —— 脚本改过 scrollTop 之后它就不管了。
+ */
+let pinnedEl = null
+/** 它相对聊天区顶部的偏移 */
+let pinnedOffset = 0
+
+/**
+ * 钉住当前视口顶部的那条消息
+ */
+const pinTopMessage = () => {
+  const container = chatScrollRef.value
+  const el = container?.querySelector('[data-msg]')
+  if (!el || !container) {
+    pinnedEl = null
+    return
+  }
+  pinnedEl = el
+  pinnedOffset = el.getBoundingClientRect().top - container.getBoundingClientRect().top
+}
+
+/**
+ * 把钉住的那条消息挪回原位(高度变了就调)
+ */
+const repinTopMessage = () => {
+  const container = chatScrollRef.value
+  // 钉住的元素没了(换会话、重新加载)—— 就别钉了
+  if (!pinnedEl || !container || !pinnedEl.isConnected) {
+    pinnedEl = null
+    return
+  }
+  const delta =
+    pinnedEl.getBoundingClientRect().top - container.getBoundingClientRect().top - pinnedOffset
+  // 元素在视口里往下跑了多少(滚动位置不动的话,它就被上面新加的内容顶下去了),
+  // 容器就往下滚那么多 —— 元素回到原来的位置,用户正看着的内容不动
+  if (delta) container.scrollTop += delta
+}
+
 const watchContentHeight = () => {
   if (!window.ResizeObserver || !chatContentRef.value) return
   contentObserver?.disconnect()
@@ -343,8 +395,12 @@ const watchContentHeight = () => {
     // 长高之前贴不贴底(用长高之前的高度算)
     const wasAtBottom = lastContentHeight - el.scrollTop - el.clientHeight <= 24
     lastContentHeight = height
-    // ⚠️ 往上翻页的时候别跟着滚 —— prepend 完自己会把位置挪回去
-    if (loadingOlder.value) return
+    // ⚠️ 往上翻页时优先「锚定」:用户正看着的那条消息不能动
+    //    (新加载的那页 Markdown 还在异步渲染,高度会再长一次)
+    if (pinnedEl) {
+      repinTopMessage()
+      return
+    }
     if (!wasAtBottom) return
     stickToBottom.value = true
     el.scrollTop = height
@@ -538,6 +594,8 @@ const loadHistory = async () => {
     totalTurns.value = res.totalTurns
     archivedInWindow.value = countUserTurns(res.items)
     historyMessageCount.value = res.items.length
+    // 换会话了 → 之前钉住的那条消息不算数
+    pinnedEl = null
     chatList.value = res.items.length ? mapHistory(res.items) : [{ ...GREETING }]
     renumberTurns()
     scrollToBottom(true)
@@ -555,15 +613,20 @@ const loadHistory = async () => {
  * <p>⚠️ prepend 之后**必须把滚动位置挪回去**:
  *    上面凭空多出一屏内容,不管的话用户看到的是「画面猛地跳了一下」——
  *    他正盯着的那条消息直接被顶出屏幕了,像是点错了。
- *    办法:记住加载前的 scrollHeight,prepend 完再把 scrollTop 加上新增加的高度。
+ *
+ * <p>⚠️ 挪位置要**钉住那条消息**,不能按高度差算一次:
+ *    新加载的这一页里 Markdown 是异步渲染的 —— 挪位置那一刻它还没渲染完,
+ *    按高度差算会算小;等它渲染完内容再长高一截,那条消息就又被顶出去了
+ *    (实测:翻到第 2 页时它跑出了屏幕 864px)。
  */
 const loadOlderHistory = async () => {
   if (loadingOlder.value || !historyHasMore.value || !historyCursor.value) return
   const uuid = chatId.value
+  // ⚠️ 先把「用户正看着的那条消息」钉住 —— **现在**钉,不是等数据回来再钉:
+  //    等回来的这一路上,上一批消息的 Markdown 可能还在渲染(位置在变),
+  //    钉到的就不是用户正在看的那条了(实测:钉到了视口外 1394px 的地方,等于没钉)
+  pinTopMessage()
   loadingOlder.value = true
-  const el = chatScrollRef.value
-  const prevHeight = el?.scrollHeight ?? 0
-  const prevTop = el?.scrollTop ?? 0
   try {
     const res = await conversationApi.messages({
       chatId: uuid,
@@ -582,9 +645,9 @@ const loadOlderHistory = async () => {
     if (res.items.length) {
       chatList.value = [...mapHistory(res.items), ...chatList.value]
       renumberTurns()
-      // 把滚动位置挪回去(见上面的说明)
       await nextTick()
-      if (el) el.scrollTop = prevTop + (el.scrollHeight - prevHeight)
+      // 插完先挪一次;后面 Markdown 渲染完还会再挪(见 repinTopMessage)
+      repinTopMessage()
     }
   } catch (e) {
     console.error('加载更早的消息失败: ', e)
