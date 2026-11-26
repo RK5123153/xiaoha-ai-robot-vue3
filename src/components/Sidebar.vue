@@ -118,30 +118,17 @@
         </button>
       </div>
 
-      <!-- 底部:模型选择 + 联网搜索 -->
-      <div class="shrink-0 border-t border-gray-200 p-3 space-y-2">
-        <select
-          v-model="modelCode"
-          class="w-full bg-white border border-gray-200 rounded-lg px-2 py-1.5 text-sm
-                 text-gray-700 outline-none focus:border-[#4d6bfe]"
-          title="选择对话模型"
-        >
-          <option value="">默认模型（后端配置）</option>
-          <option v-for="m in modelState.models" :key="m.code" :value="m.code">
-            {{ m.name }}
-          </option>
-        </select>
+      <!--
+        底部原来放着「模型选择 + 联网搜索」,现在挪到**输入框左下角**了
+        (见 components/ModelPicker.vue / WebSearchToggle.vue)。
 
-        <label class="flex items-center gap-2 px-1 text-xs text-gray-500 cursor-pointer select-none">
-          <input
-            v-model="modelState.webSearch"
-            type="checkbox"
-            class="w-3.5 h-3.5 accent-[#4d6bfe] cursor-pointer"
-          />
-          联网搜索
-          <span class="text-gray-400 truncate">({{ currentModelDesc }})</span>
-        </label>
-      </div>
+        <p>为什么挪:
+          <ul>
+            <li>侧边栏在移动端是抽屉 —— 那两个开关根本点不到。</li>
+            <li>改模型/开联网搜索是「打字时顺手做的事」,输入框才是那会儿你盯着的地方。</li>
+            <li>同一个设置散在两个地方,迟早会有人只改一处。</li>
+          </ul>
+      -->
     </div>
   </aside>
 </template>
@@ -153,12 +140,10 @@ import ChatListItem from '@/components/ChatListItem.vue'
 import BrandLogo from '@/components/BrandLogo.vue'
 import {
   chatState,
-  modelState,
   groupedChats,
   loadChats,
   removeChat,
   renameChat,
-  selectModel,
 } from '@/utils/chat-store.js'
 
 const props = defineProps({
@@ -175,24 +160,6 @@ const router = useRouter()
 
 /** 当前打开的会话 uuid(用来高亮侧边栏里的那一条) */
 const activeUuid = computed(() => route.params?.uuid || '')
-
-/**
- * 模型选择框的值
- *
- * <p>用 computed + setter,而不是直接 v-model 绑定 store 里的字段 ——
- *    换了模型要把「支不支持联网搜索」一起对齐(有的模型不支持联网),
- *    这件事得走 {@link selectModel}。
- */
-const modelCode = computed({
-  get: () => modelState.code,
-  set: (code) => selectModel(code),
-})
-
-/** 当前模型的说明(给「联网搜索」那一行当提示) */
-const currentModelDesc = computed(() => {
-  const model = modelState.models.find((m) => m.code === modelState.code)
-  return model?.description || '由后端决定'
-})
 
 /** 回首页(新对话) */
 const goHome = () => {

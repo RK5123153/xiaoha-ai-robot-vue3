@@ -90,74 +90,34 @@
       </div>
     </div>
 
-    <!-- 发送消息输入框 -->
+    <!--
+      发送消息输入框 —— 和首页共用同一个组件(ChatInputBox.vue)。
+      两个页面只有三处不同:能不能带图、要不要显示工具开关、提示文案。
+    -->
     <div class="w-full mb-5 shrink-0 px-4">
       <div class="mx-auto w-full max-w-3xl">
-      <div class="bg-gray-100 rounded-3xl px-4 py-3 flex flex-col border border-gray-200 transition-colors"
-           :class="{ 'is-dropping': isDragOver }"
-           @dragenter.prevent="onDragEnter"
-           @dragover.prevent
-           @dragleave.prevent="onDragLeave"
-           @drop.prevent="onDrop"
-           @paste="onPaste">
-        <!-- 已选中的图片（还没发出去） -->
-        <div v-if="attachment" class="mb-2">
-          <ImageChip
-            :attachment="attachment"
-            :busy="preparingImage"
-            @remove="clearAttachment"
-            @preview="openPreview(attachment)"
-          />
-        </div>
-
-        <!-- 工具开关:抽成组件了 —— 首页的输入框下面也有一份,状态是同一份 -->
-        <ToolBar v-if="mode === 'text'" />
-
-        <!-- 看图说话模式的提示：把「无状态」这件事说在前面，别让用户误以为模型记得上一张图 -->
-        <p v-if="mode === 'vision'" class="hint mb-1.5">
-          看图说话是「一张图 + 一个问题」的独立问答，不带聊天记忆
-        </p>
-
-        <textarea
+        <ChatInputBox
+          ref="inputRef"
           v-model="message"
+          :attachment="attachment"
+          :busy="preparingImage"
+          :send-disabled="sendDisabled"
           :placeholder="mode === 'vision' ? '描述这张图…（留空就让模型自己描述）' : '给小哈 AI 机器人发送消息（Enter 发送，Shift + Enter 换行）'"
-          class="bg-transparent border-none outline-none w-full text-sm resize-none min-h-[24px]"
-          rows="2"
-          @input="autoResize"
-          @keydown="handleKeydown"
-          @compositionstart="handleCompositionStart"
-          @compositionend="handleCompositionEnd"
-          ref="textareaRef"
-        ></textarea>
-        <!-- 发送按钮 -->
-        <div class="flex justify-end items-center gap-2">
-          <!-- 看图说话才需要选图；文字模式下不显示，免得以为文字也能带图 -->
-          <ImagePicker
-            v-if="mode === 'vision'"
-            :disabled="isSending || preparingImage"
-            @pick="onPickImage"
-          />
-          <button
-            @click="sendMessage"
-            :disabled="sendDisabled"
-            aria-label="发送消息"
-            title="发送（Enter）"
-            class="flex items-center justify-center bg-[#4d6bfe] text-white rounded-full w-8 h-8 border border-[#4d6bfe] hover:bg-[#3b5bef] transition-colors
-                   disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-[#4d6bfe]">
-            <ArrowUpOutlined class="text-xl" />
-          </button>
-        </div>
-      </div>
-      <DisclaimerBar />
+          :allow-image="mode === 'vision'"
+          :show-tools="mode === 'text'"
+          :hint="mode === 'vision' ? '看图说话是「一张图 + 一个问题」的独立问答，不带聊天记忆' : ''"
+          @send="sendMessage"
+          @pick-image="pickImage"
+          @remove-image="removeImage"
+        />
+        <DisclaimerBar />
       </div>
     </div>
 
     <!-- 轻提示用 antd 的 message(见 App.vue 的 message.config) -->
 
-    <!-- 图片放大预览：点遮罩或按 Esc 关闭 -->
-    <div v-if="previewUrl" class="preview-overlay" @click="previewUrl = ''">
-      <img :src="previewUrl" class="preview-img" alt="预览" @click.stop />
-    </div>
+    <!-- 图片放大预览:点遮罩或按 Esc 关闭 -->
+    <ImagePreview v-if="previewUrl" :url="previewUrl" @close="previewUrl = ''" />
   </div>
 </template>
 
@@ -169,15 +129,14 @@ import { message as antMessage } from 'ant-design-vue'
 import StreamMarkdownRender from '@/components/StreamMarkdownRender.vue'
 import MessageActions from '@/components/MessageActions.vue'
 import BrandLogo from '@/components/BrandLogo.vue'
-import ImagePicker from '@/components/ImagePicker.vue'
-import ImageChip from '@/components/ImageChip.vue'
+import ChatInputBox from '@/components/ChatInputBox.vue'
+import ImagePreview from '@/components/ImagePreview.vue'
 import { parseChunkPayload, readSseStream } from '@/utils/sse.js'
 import { lastRegenerableId, turnIndexOf as turnIndexOfMessage } from '@/utils/chat-turn.js'
 import { chatApi, conversationApi } from '@/utils/api.js'
-import { prepareImage, isImageFile } from '@/utils/image.js'
+import { useAttachment } from '@/utils/attachment.js'
 import { sendVisionStream, DEFAULT_QUESTION } from '@/utils/vision.js'
 import { handoff, loadChats, modelState, toolsParam } from '@/utils/chat-store.js'
-import ToolBar from '@/components/ToolBar.vue'
 import DisclaimerBar from '@/components/DisclaimerBar.vue'
 
 const route = useRoute()
@@ -205,39 +164,22 @@ const loadingHistory = ref(false)
 /* 工具开关的状态在 store 里(utils/chat-store.js):首页和聊天页共用同一份勾选。 */
 /* ──────────────────────────────────────────────────────────────────────
  * 输入框
+ *
+ * <p>输入框**本身**是 ChatInputBox 组件 —— 自动长高、Enter 发送、拖图、粘贴图
+ *    这些都在组件里。这里只留「页面特有」的那部分:草稿文字、待发送的图片、
+ *    以及发出去之后干什么。
  * ────────────────────────────────────────────────────────────────────── */
 
 const message = ref('')
-const textareaRef = ref(null)
+/** 输入框组件(要拿它的 focus) */
+const inputRef = ref(null)
 const chatScrollRef = ref(null)
 const isSending = ref(false)
-
-/** 轻提示文案（空字符串 = 不显示） */
 
 /** 生成消息 id */
 const genId = () =>
   globalThis.crypto?.randomUUID?.() ||
   `m-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
-
-/** 输入框最大高度（px）。超过就在输入框内部滚动，不把整个页面挤爆 */
-const MAX_INPUT_HEIGHT = 300
-
-/**
- * 自动调整文本域高度
- *
- * 关键点：
- * 1. 先把 height 归零再量 scrollHeight —— 否则删字时高度只增不减，框会越撑越大
- * 2. 量到的高度要封顶，超过 MAX_INPUT_HEIGHT 就让输入框自己滚
- */
-const autoResize = () => {
-  const textarea = textareaRef.value
-  if (!textarea) return
-  textarea.style.height = 'auto'
-  // scrollHeight 是内容高度，和当前 height 无关
-  const contentHeight = textarea.scrollHeight
-  textarea.style.height = Math.min(contentHeight, MAX_INPUT_HEIGHT) + 'px'
-  textarea.style.overflowY = contentHeight > MAX_INPUT_HEIGHT ? 'auto' : 'hidden'
-}
 
 /**
  * 是否「贴底」
@@ -267,44 +209,6 @@ const scrollToBottom = async (force = false) => {
   el.scrollTop = el.scrollHeight
 }
 
-/** 输入法组字状态：中文输入法选词时会触发 Enter，必须和「发送」区分开 */
-const isComposing = ref(false)
-/** 最近一次输入法结束的时间戳：部分浏览器在 compositionend 之后还会补发一个 Enter */
-let composingEndedAt = 0
-
-const handleCompositionStart = () => {
-  isComposing.value = true
-}
-
-const handleCompositionEnd = () => {
-  isComposing.value = false
-  composingEndedAt = Date.now()
-}
-
-/**
- * 键盘事件：Enter 发送，Shift+Enter 换行
- *
- * ⚠️ 中文输入法（最容易被忽略的坑）：
- *   用拼音打字时按 Enter 是「选词」，不是「发送」。不加判断的话，
- *   用户每选一次词就会把半句话发出去。
- *   三个信号一起看才稳：
- *     1. e.isComposing  —— 标准属性，组字期间为 true
- *     2. e.keyCode === 229 —— 老浏览器的组字标记
- *     3. isComposing.value —— 我们自己在 compositionstart/end 里维护的状态
- *   另外部分浏览器在 compositionend 之后还会补发一个 Enter 的 keydown，
- *   用时间戳把这一小段时间内的 Enter 吞掉（人手动再按一次至少隔 150ms，误伤不到）。
- */
-const handleKeydown = (e) => {
-  if (e.key !== 'Enter') return
-  // 组字中 / 刚结束组字：Enter 是选词，不发送
-  if (e.isComposing || e.keyCode === 229 || isComposing.value) return
-  if (Date.now() - composingEndedAt < 100) return
-  // Shift+Enter 不拦截，走浏览器默认行为（插入换行）
-  if (e.shiftKey) return
-  e.preventDefault()
-  sendMessage()
-}
-
 /* ──────────────────────────────────────────────────────────────────────
  * 聊天记录
  * ────────────────────────────────────────────────────────────────────── */
@@ -323,6 +227,16 @@ const GREETING = {
 
 /** 聊天记录 */
 const chatList = ref([])
+
+/**
+ * 待发送的图片(压缩、预览地址、回收都在 useAttachment 里)
+ *
+ * <p>⚠️ isUrlInUse:气泡里的缩略图正在用某个预览地址时,那个地址不能回收 ——
+ *    回收掉用户看到的就是裂图。
+ */
+const { attachment, preparingImage, pickImage, removeImage, adoptImage } = useAttachment({
+  isUrlInUse: (url) => chatList.value.some((c) => c.image?.previewUrl === url),
+})
 
 /** 每条消息的点赞/点踩状态：{ [messageId]: 'up' | 'down' | '' } */
 const feedbackMap = ref({})
@@ -456,14 +370,7 @@ const consumeHandoff = async () => {
     // 看图说话:图片已经在首页压缩好了,直接用
     mode.value = 'vision'
     // 预览地址的所有权从首页转到这里 —— 首页那边已经不再回收它了
-    if (preview && !objectUrls.includes(preview)) objectUrls.push(preview)
-    attachment.value = {
-      id: genId(),
-      file,
-      previewUrl: preview,
-      name: file.name || '图片',
-      size: file.size || 0,
-    }
+    adoptImage({ file, previewUrl: preview })
     message.value = text
     await sendVisionMessage()
     return
@@ -700,13 +607,10 @@ const sendTextMessage = async () => {
   chatList.value.push({ id: genId(), role: 'assistant', kind: 'text', content: '', pending: true, done: false, failed: '', turn })
   const replyIndex = chatList.value.length - 1
 
-  // 清空输入框并把高度收回去。
-  // v-model 的值是异步刷新的，必须等 DOM 更新完再量高度，否则量到的还是旧内容的高度
+  // 清空输入框(高度会自己收回去 —— 输入框组件盯着内容变化)
   message.value = ''
-  await nextTick()
-  autoResize()
   // 焦点回到输入框，方便连续追问
-  textareaRef.value?.focus()
+  inputRef.value?.focus()
 
   // 强制滚到底：用户刚发了消息，无条件跟随
   scrollToBottom(true)
@@ -756,11 +660,11 @@ const sendVisionMessage = async () => {
   const replyIndex = chatList.value.length - 1
 
   // 图已经随消息发出去了，输入框复位
+  // ⚠️ 直接置空,不走 removeImage():气泡里的缩略图还在用这个预览地址,
+  //    这时候回收掉,用户看到的就是一张裂图。
   attachment.value = null
   message.value = ''
-  await nextTick()
-  autoResize()
-  textareaRef.value?.focus()
+  inputRef.value?.focus()
   scrollToBottom(true)
 
   await runVisionRequest(att.file, question, replyIndex)
@@ -893,7 +797,8 @@ const handleFeedback = (messageId, rating) => {
 }
 
 /* ──────────────────────────────────────────────────────────────────────
- * 看图说话：图片的选择、压缩、预览
+ * 看图说话:图片的状态在上面(和 chatList 放在一起),
+ * 拖拽/粘贴这些交互在 ChatInputBox 组件里。
  * ────────────────────────────────────────────────────────────────────── */
 
 /**
@@ -909,145 +814,18 @@ const visionChatId = (() => {
   return uuid || `web-vision-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 })()
 
-/** 待发送的图片：{ id, file, previewUrl, name, size } */
-const attachment = ref(null)
-
-/** 正在处理（压缩）图片 —— 大图要缩放，有几百毫秒的空档 */
-const preparingImage = ref(false)
-
-/** 拖拽悬停在输入框上（高亮提示「可以放这儿」） */
-const isDragOver = ref(false)
-
 /**
- * 创建过的 object URL
+ * 待发送的图片、压缩状态、图片按钮的禁用态 —— 都在上面的 useAttachment 里。
  *
- * 统一在组件卸载时回收。图片发出去之后缩略图还要留在气泡里，
- * 所以中途不能随便 revoke —— 只在「确定没人再引用」时才释放。
+ * <p>拖拽/粘贴这些交互在 ChatInputBox 组件里(它才是那个「放置区」),
+ *    这里只管「拿到一张图之后怎么办」。
  */
-const objectUrls = []
 
-/**
- * 释放一个 object URL（如果还有消息在用它，就留着）
- *
- * @param {string} url
- */
-const releaseObjectUrl = (url) => {
-  if (!url) return
-  // 消息气泡里的缩略图还在用这个 URL → 不能回收
-  if (chatList.value.some((c) => c.image?.previewUrl === url)) return
-  const i = objectUrls.indexOf(url)
-  if (i !== -1) {
-    objectUrls.splice(i, 1)
-    URL.revokeObjectURL(url)
-  }
-}
-
-/**
- * 选好一张图（点了按钮 / 粘贴 / 拖拽都走这里）
- *
- * @param {File} file
- */
-const onPickImage = async (file) => {
-  if (!file || isSending.value) return
-  preparingImage.value = true
-  try {
-    // 压缩到大后端能收的体积（Spring 容器默认只收 1MB）
-    const { file: prepared } = await prepareImage(file)
-    const previewUrl = URL.createObjectURL(prepared)
-    objectUrls.push(previewUrl)
-
-    const old = attachment.value
-    attachment.value = {
-      id: genId(),
-      file: prepared,
-      previewUrl,
-      name: prepared.name,
-      size: prepared.size,
-    }
-    // 换掉的旧图没人引用了才回收
-    if (old) releaseObjectUrl(old.previewUrl)
-  } catch (e) {
-    console.error('图片处理失败: ', e)
-    antMessage.info(e.message || '这个文件不能当图片用')
-  } finally {
-    preparingImage.value = false
-  }
-}
-
-/** 移除待发送的图片 */
-const clearAttachment = () => {
-  const old = attachment.value
-  attachment.value = null
-  if (old) releaseObjectUrl(old.previewUrl)
-}
-
-/** 拖拽进入计数器：dragenter/dragleave 会在子元素间反复触发，用计数才不会闪 */
-let dragDepth = 0
-
-const onDragEnter = () => {
-  if (mode.value !== 'vision') return
-  dragDepth++
-  isDragOver.value = true
-}
-
-const onDragLeave = () => {
-  if (mode.value !== 'vision') return
-  dragDepth = Math.max(0, dragDepth - 1)
-  if (dragDepth === 0) isDragOver.value = false
-}
-
-/**
- * 放下文件
- *
- * ⚠️ 只认图片:拖进来一个 txt 的话,后端会 400，
- *    而且 Spring AI 会**静默丢掉**非图片附件（症状是「图没发出去，模型只看到一句话」），
- *    所以前端先拦一道，给人话。
- */
-const onDrop = (e) => {
-  dragDepth = 0
-  isDragOver.value = false
-  if (mode.value !== 'vision') return
-  const files = e.dataTransfer?.files || []
-  for (const f of files) {
-    if (isImageFile(f)) {
-      onPickImage(f)
-      return
-    }
-  }
-  antMessage.info('只能把图片拖进来')
-}
-
-/**
- * 粘贴图片（截图工具 / 右键复制图片）
- *
- * ⚠️ 不 preventDefault：剪贴板里可能同时有图和字（比如从网页复制一段），
- *    把文字也挡掉的话用户会觉得「粘贴失灵了」。
- */
-const onPaste = (e) => {
-  if (mode.value !== 'vision') return
-  const items = e.clipboardData?.items
-  if (!items) return
-  for (const item of items) {
-    if (item.kind === 'file' && item.type?.startsWith('image/')) {
-      const file = item.getAsFile()
-      if (file) {
-        onPickImage(file)
-        return
-      }
-    }
-  }
-}
-
-/** 放大的图片预览（点遮罩关闭） */
+/** 放大的图片预览（点遮罩或按 Esc 关闭 —— Esc 由 ImagePreview 组件自己监听） */
 const previewUrl = ref('')
 
 const openPreview = (image) => {
   if (image?.previewUrl) previewUrl.value = image.previewUrl
-}
-
-/** Esc 关掉预览 */
-const handlePreviewKeydown = (e) => {
-  if (e.key === 'Escape') previewUrl.value = ''
 }
 
 /**
@@ -1082,7 +860,7 @@ const visionModel = urlParam('visionModel')
 const switchMode = (next) => {
   if (mode.value === next) return
   mode.value = next
-  if (next !== 'vision') clearAttachment()
+  if (next !== 'vision') removeImage()
 }
 
 /** 看图说话那条链路的请求控制器（用来中途掐断） */
@@ -1090,11 +868,8 @@ const switchMode = (next) => {
 
 // 组件挂载后初始化
 onMounted(async () => {
-  autoResize()
-  textareaRef.value?.focus()
   // ⚠️ 工具清单不在这里拉 —— Layout 挂载时拉一次就够了(整个应用共用一份)。
   //    这里再拉一次会用 localStorage 里的旧值覆盖用户刚在页面上做的勾选。
-  window.addEventListener('keydown', handlePreviewKeydown)
 
   await loadHistory()
   await consumeHandoff()
@@ -1106,10 +881,7 @@ onBeforeUnmount(() => {
   // ⚠️ 走 fetch 的那条链路不会自动断,得手动 abort ——
   //    否则组件没了请求还在跑,白白烧后端的 token
   visionController?.abort()
-  window.removeEventListener('keydown', handlePreviewKeydown)
-  // object URL 不回收会一直占着内存(每个都是一个 Blob 的引用)
-  objectUrls.forEach((url) => URL.revokeObjectURL(url))
-  objectUrls.length = 0
+  // object URL 的回收在 useAttachment 里(它自己记着自己创建过哪些)
 })
 
 /**
@@ -1165,20 +937,7 @@ watch(
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
 }
 
-/* ---------- 工具开关 ---------- */
-
 /* ---------- 看图说话 ---------- */
-/* 拖拽悬停：告诉用户「可以放这儿」 */
-.is-dropping {
-  background: #eff6ff;
-  border-color: #4d6bfe;
-}
-
-.hint {
-  font-size: 11px;
-  line-height: 16px;
-  color: #9ca3af;
-}
 
 /* 提问气泡里的图片 */
 .vision-thumb {
@@ -1189,27 +948,6 @@ watch(
   border-radius: 10px;
   margin-bottom: 6px;
   cursor: zoom-in;
-}
-
-/* 图片放大预览 */
-.preview-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 60;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  background: rgba(17, 24, 39, 0.75);
-  cursor: zoom-out;
-}
-
-.preview-img {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
-  border-radius: 8px;
-  cursor: default;
 }
 
 

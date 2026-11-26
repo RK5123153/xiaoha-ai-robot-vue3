@@ -18,7 +18,7 @@
     >
       <button
         type="button"
-        class="tool-chip"
+        class="chip"
         :class="{ 'is-on': toolState.selected.includes(t.name), 'is-off': t.available === false }"
         :aria-disabled="t.available === false"
         @click="toggleTool(t.name)"
@@ -51,43 +51,6 @@ import { toolState, toggleTool } from '@/utils/chat-store.js'
 
 .tool-bar-label {
   font-size: 12px;
-  color: #9ca3af;
-}
-
-/* 未勾选 = 灰底;勾上 = 主色,一眼能看出「这次会带哪些工具」 */
-.tool-chip {
-  padding: 3px 10px;
-  border-radius: 9999px;
-  font-size: 12px;
-  line-height: 18px;
-  color: #6b7280;
-  background: #fff;
-  border: 1px solid #e5e7eb;
-  cursor: pointer;
-  transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
-}
-
-.tool-chip:hover {
-  border-color: #4d6bfe;
-  color: #4d6bfe;
-}
-
-.tool-chip.is-on {
-  color: #fff;
-  background: #4d6bfe;
-  border-color: #4d6bfe;
-}
-
-/* 不可用的工具(比如 GitHub 没配 PAT):灰着、点不动 —— 鼠标悬停能看到原因 */
-.tool-chip.is-off {
-  color: #9ca3af;
-  background: #f9fafb;
-  border-color: #e5e7eb;
-  cursor: not-allowed;
-}
-
-.tool-chip.is-off:hover {
-  border-color: #e5e7eb;
   color: #9ca3af;
 }
 </style>

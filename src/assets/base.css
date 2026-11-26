@@ -1,3 +1,57 @@
+/* ---------- 输入框底部的小圆片(工具开关 / 模型选择 / 联网搜索) ----------
+   这三处是同一套控件,样式也该是同一套:
+   各写各的(scoped CSS)迟早会走样 —— 圆角、字号、hover 颜色对不上,
+   一眼看过去就像两个产品做的。所以样式放这儿,几个组件共用。
+
+   ⚠️ 放在 @layer components 里(而不是普通 CSS):
+      Tailwind v4 的工具类在 utilities 层,而**没有层级**的普通 CSS
+      优先级比任何层都高 —— 写成普通 CSS 的话,
+      以后谁想用 text-xs / bg-white 覆盖这个圆片的样式就会「覆盖不掉」。
+      放进 components 层,工具类就能正常盖它。 */
+@layer components {
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 10px;
+    border-radius: 9999px;
+    font-size: 12px;
+    line-height: 18px;
+    color: #6b7280;
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    cursor: pointer;
+    transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
+  }
+
+  .chip:hover {
+    border-color: #4d6bfe;
+    color: #4d6bfe;
+  }
+
+  /* 勾上了 = 主色,一眼能看出「这次会带哪些能力」 */
+  .chip.is-on {
+    color: #fff;
+    background: #4d6bfe;
+    border-color: #4d6bfe;
+  }
+
+  /* 用不了(比如这个模型不支持联网搜索):灰着、点不动 —— 鼠标悬停能看到原因 */
+  .chip.is-off,
+  .chip[aria-disabled='true'] {
+    color: #9ca3af;
+    background: #f9fafb;
+    border-color: #e5e7eb;
+    cursor: not-allowed;
+  }
+
+  .chip.is-off:hover,
+  .chip[aria-disabled='true']:hover {
+    border-color: #e5e7eb;
+    color: #9ca3af;
+  }
+}
+
 /* color palette from <https://github.com/vuejs/theme> */
 body {
   font-family:
