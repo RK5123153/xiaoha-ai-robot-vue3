@@ -1,5 +1,9 @@
 <template>
-  <div class="group relative">
+  <!--
+    data-uuid:侧边栏的滚动锚定靠它认出「用户正看着的那一条」——
+    列表刷新时新会话插到最前面,靠这个标记把它挪回原位(见 Sidebar.vue 的 captureAnchor)。
+  -->
+  <div class="group relative" :data-uuid="chat.uuid">
     <!-- 改名中:就地变成输入框 -->
     <div v-if="editing" class="px-1 py-0.5">
       <input

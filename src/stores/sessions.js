@@ -14,6 +14,9 @@ import { conversationApi } from '@/api/conversation.js'
 import { decodeSummary } from '@/utils/summary.js'
 
 export const useSessionStore = defineStore('sessions', () => {
+  /** 一页拉多少个会话 */
+  const PAGE_SIZE = 20
+
   /** 会话列表(按最后更新时间倒序) */
   const chats = ref([])
   /** 正在拉列表 */
@@ -22,6 +25,15 @@ export const useSessionStore = defineStore('sessions', () => {
   const hasMore = ref(false)
   /** 下一页的游标 */
   const nextCursor = ref('')
+  /**
+   * 已经翻了几页(1 = 只加载了最新的一页)
+   *
+   * <p>⚠️ 这个数是「刷新列表时用哪个游标」的关键:
+   *    翻过好几页之后,手里那个游标指着的是「**已加载的最旧那条之后**」——
+   *    刷新(重新拉第一页)时不能把它换成新响应里的游标,不然下次「加载更多」
+   *    会把已经加载过的第二页**再要一遍**,去重之后列表没长,用户看着像「点了没反应」。
+   */
+  const pagesLoaded = ref(1)
   /** 列表已经拉过一次了(避免路由来回切时重复拉) */
   const loaded = ref(false)
   /** 拉列表的当口又有人要求「重新拉」→ 等这次拉完补一次 */
@@ -92,26 +104,50 @@ export const useSessionStore = defineStore('sessions', () => {
    * 拉会话列表
    *
    * @param {object} [params]
-   * @param {boolean} [params.reset] true = 重新从第一页拉(丢掉已加载的)
-   * @returns {Promise<void>}
+   * @param {boolean} [params.reset] true = 重新拉最新的一页(标题/时间刷新);
+   *                                   false = 接着往下翻一页
+   * @returns {Promise<boolean>} 这次拉成功了吗(失败时列表原样不动)
    */
   const loadChats = async ({ reset = false } = {}) => {
     // 正在拉:别并发拉两次,但「要重来」的请求得记下来,等这次拉完再补一次。
     // (发完消息会刷新列表,路由变了也会刷新 —— 两者很容易撞在一起)
     if (loading.value) {
       if (reset) pendingReset.value = true
-      return
+      return false
     }
-    if (!reset && hasMore.value && !nextCursor.value) return
+    // ⚠️ 「往下翻」但没有游标了 → 没什么可拉的
+    //    (后端翻到底时不再给游标;hasMore=false 也是同一个意思)
+    if (!reset && (!hasMore.value || !nextCursor.value)) return false
+
+    // ⚠️ 重置(只拉最新的一页)时,「接着往下翻」要用**哪个游标**?
+    //    · 只加载过第一页 → 用这次响应里的游标(它指着第一页最旧那条之后);
+    //    · 已经翻过好几页 → 手里那个游标指着「已加载的最旧那条之后」,那才是要接着翻的位置。
+    //      换掉它的话,下次「加载更多」会把已经加载过的第二页**再要一遍**,
+    //      去重之后列表没长,用户看着像「点了没反应」。
+    //    (后端的游标锚在 (update_time, id) 上,是绝对位置不是偏移量 ——
+    //     所以刷新第一页不会把游标「顶歪」,它照样指着原来那条。)
+    const prevCursor = nextCursor.value
+    const prevHasMore = hasMore.value
+    const keepCursor = reset && pagesLoaded.value > 1
 
     loading.value = true
     try {
       const res = await conversationApi.list({
-        size: 20,
+        size: PAGE_SIZE,
         cursor: reset ? '' : nextCursor.value,
       })
       if (reset) {
-        chats.value = res.items
+        // ⚠️ 重置**不能**把列表整个换掉 —— 换掉的话:
+        //    用户往下翻了好几页,点一下会话(路由一变就重置)→ 列表被砍回第一页,
+        //    滚动位置也跳回顶上,刚才翻过的那些全白翻了。
+        //    所以是「**合并**」:新的一页放最前面,已经加载过的更早的接在后面。
+        //
+        //    (后端按 update_time 倒序排,新的一页一定比旧页都新 ——
+        //     掉出第一页的旧会话跟着「更早」那一段走,顺序不会乱。)
+        const fresh = new Set(res.items.map((c) => c.uuid))
+        chats.value = [...res.items, ...chats.value.filter((c) => !fresh.has(c.uuid))]
+        // 旧页还留着 → 页数不变(游标还指着它们之后)
+        if (!keepCursor) pagesLoaded.value = 1
       } else {
         // 游标翻页可能有重复(后端按 updateTime 排序,翻页期间又聊了新消息),
         // 按 uuid 去重再拼
@@ -120,12 +156,15 @@ export const useSessionStore = defineStore('sessions', () => {
           ...chats.value,
           ...res.items.filter((c) => c.uuid && !seen.has(c.uuid)),
         ]
+        pagesLoaded.value += 1
       }
-      hasMore.value = res.hasMore
-      nextCursor.value = res.nextCursor
+      hasMore.value = keepCursor ? prevHasMore : res.hasMore
+      nextCursor.value = keepCursor ? prevCursor : res.nextCursor
       loaded.value = true
+      return true
     } catch (e) {
       console.error('拉会话列表失败: ', e)
+      return false
     } finally {
       loading.value = false
       // 刚才有人要求「重新拉」→ 补一次

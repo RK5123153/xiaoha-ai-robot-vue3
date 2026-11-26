@@ -110,7 +110,16 @@
       </div>
 
       <!-- 会话列表 -->
-      <div class="flex-1 min-h-0 overflow-y-auto px-3 pb-3 chat-scroll">
+      <!--
+        ⚠️ data-chat-list:脚本里要定位「会话列表这个滚动容器」,
+           靠它拿 scrollHeight / clientHeight 判断「还有没有更早的会话」。
+      -->
+      <div
+        ref="listRef"
+        data-chat-list
+        class="flex-1 min-h-0 overflow-y-auto px-3 pb-3 chat-scroll"
+        @scroll="onScroll"
+      >
         <!-- 列表加载中 -->
         <p v-if="loading && !chats.length" class="px-3 py-2 text-xs text-gray-400">
           正在加载对话…
@@ -123,7 +132,18 @@
 
         <!-- 按时间分组 -->
         <div v-for="group in groupedChats" :key="group.label" class="mb-4">
-          <p class="px-3 pb-1.5 text-[11px] font-medium text-gray-400">{{ group.label }}</p>
+          <!--
+            分组标题:sticky 定位,往下翻的时候钉在顶上。
+
+            ⚠️ 两处细节,少一个就露馅:
+               · **不透明背景**:sticky 的元素是浮在内容上面的,
+                 背景透明的话,滑过去的会话标题会从标题**底下透出来**;
+               · **-mx-3 px-3**:列表容器左右各有 12px 内边距,
+                 不抵消掉的话,标题只盖住中间那条,缝里照样漏。
+          -->
+          <p class="sticky top-0 z-10 -mx-3 px-3 pt-1 pb-1.5 text-[11px] font-medium text-gray-400 bg-[#f9fbff]">
+            {{ group.label }}
+          </p>
           <div class="space-y-0.5">
             <ChatListItem
               v-for="item in group.items"
@@ -165,7 +185,7 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRoute, useRouter } from 'vue-router'
 import ChatListItem from '@/components/ChatListItem.vue'
@@ -205,11 +225,115 @@ const openChat = (uuid) => {
   router.push({ name: 'chat', params: { uuid } })
 }
 
-/** 加载更早的会话 */
-const loadMore = () => {
-  if (loading.value || !hasMore.value) return
-  sessionStore.loadChats()
+/** 会话列表的滚动容器 */
+const listRef = ref(null)
+
+/**
+ * 离底部多近就加载下一页
+ *
+ * <p>给 24px 的余量:用户滑到底之前就先加载好了,不用等他滑到头才发现还有更多。
+ */
+const BOTTOM_THRESHOLD = 24
+
+/**
+ * 还能不能继续加载更早的会话
+ *
+ * @returns {boolean}
+ */
+const canLoadMore = () => {
+  if (loading.value || !hasMore.value) return false
+  const el = listRef.value
+  if (!el) return false
+  // ⚠️ 容器还没被内容撑开 → 根本没有滚动条 → **scroll 事件永远不会来**。
+  //    这种情况下光等着用户滚是等不到的(教程里就漏了这一条):
+  //    第一页只有三五条、侧边栏又高,用户压根不知道自己下面还有内容。
+  //    所以这种情况要**自己**接着拉,拉到撑开为止。
+  if (el.scrollHeight <= el.clientHeight) return true
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= BOTTOM_THRESHOLD
 }
+
+/**
+ * 加载更早的会话(往下一页)
+ *
+ * <p>⚠️ 这不是「加载更多」按钮独占的路径 —— 滚到底也会调它。
+ *
+ * @returns {Promise<void>}
+ */
+const loadMore = async () => {
+  if (loading.value || !hasMore.value) return
+  const before = chats.value.length
+  const ok = await sessionStore.loadChats()
+  if (!ok) return
+  // ⚠️ 一条都没多 → 别再接着拉了(后端返回空页但还报 hasMore 的极端情况,
+  //    不挡住的话这里就是个死循环,一直打后端)
+  if (chats.value.length === before) return
+  await nextTick()
+}
+
+/**
+ * 滚到底部附近 → 加载下一页
+ */
+const onScroll = () => {
+  if (canLoadMore()) loadMore()
+}
+
+/**
+ * 记住「用户正看着的那条会话」
+ *
+ * <p>⚠️ 为什么需要:列表刷新时,新会话会插到**最前面**(后端按更新时间倒序),
+ *    上面凭空多出一截,用户正看着的那条就被顶下去了 —— 看着像「页面自己跳了」。
+ *    所以刷新前记下它(量的是**旧**的位置),刷新后把它挪回原位。
+ *
+ * @returns {{uuid: string, offset: number}|null}
+ */
+const captureAnchor = () => {
+  const el = listRef.value
+  if (!el) return null
+  const top = el.getBoundingClientRect().top
+  for (const node of el.querySelectorAll('[data-uuid]')) {
+    const rect = node.getBoundingClientRect()
+    // 第一个「露出一点」的 —— 完全在视口上方的跳过
+    if (rect.bottom > top + 1) {
+      return { uuid: node.getAttribute('data-uuid'), offset: rect.top - top }
+    }
+  }
+  return null
+}
+
+/**
+ * 把锚定的那条会话挪回原位
+ *
+ * @param {{uuid: string, offset: number}|null} anchor
+ */
+const restoreAnchor = (anchor) => {
+  const el = listRef.value
+  if (!el || !anchor) return
+  const node = el.querySelector(`[data-uuid="${CSS.escape(anchor.uuid)}"]`)
+  // 那条会话没了(被删了)→ 就别挪了
+  if (!node) return
+  const top = el.getBoundingClientRect().top
+  const offset = node.getBoundingClientRect().top - top
+  el.scrollTop += offset - anchor.offset
+}
+
+/**
+ * 列表变了 → 位置别乱,而且把没露出来的接着拉
+ *
+ * <p>⚠️ flush:'pre' —— 回调在 DOM 更新**之前**跑,
+ *    这时候量到的还是**旧**位置(captureAnchor 要的就是旧的);
+ *    await nextTick() 之后 DOM 才是新的,这时才能量新位置、把它挪回去。
+ */
+watch(
+  [chats, hasMore],
+  async () => {
+    const anchor = captureAnchor()
+    await nextTick()
+    restoreAnchor(anchor)
+    // 内容还没把容器撑开 → 用户滚不动 → 看不见「下面还有」→ 接着拉
+    if (canLoadMore()) loadMore()
+  },
+  { flush: 'pre' }
+)
 
 /**
  * 改名

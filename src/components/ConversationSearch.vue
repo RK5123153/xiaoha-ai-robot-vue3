@@ -39,7 +39,7 @@
     </div>
 
     <p class="search-note">
-      只搜索当前已加载的 {{ chats.length }} 条对话;更早的可以先在左边栏点「加载更多」。
+      只搜索当前已加载的 {{ chats.length }} 条对话;更早的可以先在左边栏往下翻。
     </p>
   </a-modal>
 </template>
