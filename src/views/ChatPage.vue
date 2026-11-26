@@ -136,7 +136,7 @@ import { lastRegenerableId, turnIndexOf as turnIndexOfMessage } from '@/utils/ch
 import { chatApi, conversationApi } from '@/utils/api.js'
 import { useAttachment } from '@/utils/attachment.js'
 import { sendVisionStream, DEFAULT_QUESTION } from '@/utils/vision.js'
-import { handoff, loadChats, modelState, toolsParam } from '@/utils/chat-store.js'
+import { handoff, loadChats, modelState, toolsParam, resolveWebSearch } from '@/utils/chat-store.js'
 import DisclaimerBar from '@/components/DisclaimerBar.vue'
 
 const route = useRoute()
@@ -422,11 +422,19 @@ const startStream = async (userMessage, replyIndex) => {
     //
     // ⚠️ 这里是 **POST**,不能用 EventSource(它只能发 GET)——
     //    所以自己 fetch + ReadableStream 读 SSE(帧解析在 utils/sse.js)。
+    //
+    // ⚠️ 联网搜索:用户开着、但当前模型不支持的话,这次不联网 ——
+    //    发 networkSearch=true 后端会直接 400(它不静默降级),
+    //    所以这里降级成 false,同时告诉用户「本次没联网」,
+    //    别让人以为「开了却没搜」是模型能力之外的事。
+    const webSearch = resolveWebSearch()
+    if (webSearch.reason) antMessage.info(webSearch.reason)
+
     const res = await conversationApi.completion({
       message: userMessage,
       chatId: chatId.value,
       modelName: modelState.code,
-      networkSearch: modelState.webSearch,
+      networkSearch: webSearch.enabled,
       tools: toolsParam.value,
       signal: controller.signal,
     })

@@ -266,14 +266,41 @@ export const loadModels = async () => {
 }
 
 /**
- * 选模型(顺带把「支不支持联网搜索」对齐到模型的能力)
+ * 选模型
+ *
+ * <p>⚠️ 这里**不碰** webSearch:联网搜索是用户自己的偏好,
+ *    和「用哪个模型」是两件事。
+ *    以前选模型的时候顺手把联网搜索对齐到模型的能力,结果用户勾上的联网搜索
+ *    被模型切换悄悄改掉 —— 换个不支持联网的模型,搜索就被关了,
+ *    用户会以为是自己关的,更糟的是「我明明开着联网」却没搜。
  *
  * @param {string} code 模型 code;空 = 用后端默认
  */
 export const selectModel = (code) => {
   modelState.code = code || ''
-  const model = modelState.models.find((m) => m.code === code)
-  modelState.webSearch = !!model?.webSearch
+}
+
+/**
+ * 本次请求「实际」要不要联网搜索
+ *
+ * <p>⚠️ 用户开着、但选的模型不支持 → **不能**发 networkSearch=true:
+ *    后端对这种情况直接 400(它不静默降级 —— 照常回答只是没搜,
+ *    会让人以为「搜过了」,拿到的却是模型的过时知识,比报错更难发现)。
+ *    所以这里降级成 false,并把原因带回去,由界面告诉用户「本次没有联网」。
+ *
+ * <p>⚠️ code 为空(用后端配的默认模型)时,前端**不知道**它支不支持 ——
+ *    后端没把「哪个是默认」标出来。这种情况按「支持」处理:
+ *    真不支持的话,后端会返回一句人话错误(「请换一个支持联网搜索的模型…」)。
+ *
+ * @returns {{enabled: boolean, reason: string}} reason 非空 = 被降级了,得告诉用户
+ */
+export const resolveWebSearch = () => {
+  if (!modelState.webSearch) return { enabled: false, reason: '' }
+  const model = modelState.models.find((m) => m.code === modelState.code)
+  if (model && model.webSearch === false) {
+    return { enabled: false, reason: `「${model.name}」不支持联网搜索,本次没有联网` }
+  }
+  return { enabled: true, reason: '' }
 }
 
 /**

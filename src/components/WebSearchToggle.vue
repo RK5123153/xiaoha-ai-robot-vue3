@@ -2,17 +2,16 @@
   <!--
     「联网搜索」开关 —— 输入框左下角,模型选择旁边
 
-    ⚠️ 用 aria-disabled 而不是 disabled:
-       disabled 的按钮在浏览器里**不派发鼠标事件**,antd 的 Tooltip 靠的就是这些事件
-       → 灰着的按钮反而**弹不出**「为什么不能用」的说明,而这恰恰是最需要说明的时候。
-       aria-disabled 只改语义,事件照常派发:提示能弹,点击由代码拦掉。
+    ⚠️ 这是**用户自己的偏好**,和「用哪个模型」是两件事:
+       换模型不会改它(以前换模型会顺手把它关掉,用户会以为是自己关的)。
+       但当前模型不支持联网时,勾了也没用 —— 这时用警示色提示,
+       并在提示里说清楚「换个模型就恢复」。
   -->
   <a-tooltip :title="tip" placement="top">
     <button
       type="button"
       class="chip"
-      :class="{ 'is-on': modelState.webSearch }"
-      :aria-disabled="unsupported"
+      :class="{ 'is-on': on, 'is-warn': on && unsupported }"
       @click="toggle"
     >
       <GlobalOutlined class="text-[13px]" />
@@ -25,27 +24,28 @@
 import { computed } from 'vue'
 import { modelState } from '@/utils/chat-store.js'
 
-/** 当前选的模型(可能是空 = 用后端默认) */
-const model = computed(() => modelState.models.find((m) => m.code === modelState.code))
+/** 开着没有 */
+const on = computed(() => modelState.webSearch)
 
 /**
- * 这个模型是不是明确不支持联网搜索
+ * 当前选的模型支不支持联网搜索
  *
- * <p>⚠️ 只有**明确知道**不支持时才拦:
- *    后端没给模型清单时(modelState.models 是空的),别把联网搜索锁死 ——
- *    那等于让用户彻底用不了这个功能。
+ * <p>code 为空(用后端配的默认模型)时不知道 → 当作支持。
  */
-const unsupported = computed(() => !!model.value && model.value.webSearch === false)
+const unsupported = computed(() => {
+  const model = modelState.models.find((m) => m.code === modelState.code)
+  return !!model && model.webSearch === false
+})
 
 /** 悬停提示 */
 const tip = computed(() => {
+  if (on.value && unsupported.value) return '这个模型不支持联网搜索,本次不会联网(换个模型就恢复)'
   if (unsupported.value) return '这个模型不支持联网搜索'
   return '让模型联网查最新资料'
 })
 
-/** 开 / 关 */
+/** 开 / 关 —— 只改用户自己的偏好,跟选了哪个模型无关 */
 const toggle = () => {
-  if (unsupported.value) return
   modelState.webSearch = !modelState.webSearch
 }
 </script>
