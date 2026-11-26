@@ -138,7 +138,8 @@ import { conversationApi } from '@/api/conversation.js'
 import { feedbackApi } from '@/api/chat.js'
 import { useAttachment } from '@/utils/attachment.js'
 import { sendVisionStream, DEFAULT_QUESTION } from '@/utils/vision.js'
-import { handoff, loadChats, modelState, toolsParam, resolveWebSearch } from '@/utils/chat-store.js'
+import { loadChats, modelState, toolsParam, resolveWebSearch } from '@/utils/chat-store.js'
+import { peekHandoff, clearHandoff } from '@/utils/handoff.js'
 import DisclaimerBar from '@/components/DisclaimerBar.vue'
 
 const route = useRoute()
@@ -354,32 +355,64 @@ const loadHistory = async () => {
 /**
  * 消费首页交接过来的消息(有图就走看图说话,没图就走文字对话)
  *
- * <p>用完立刻清空 —— 不清的话,下次进这个页面会把同一条消息**再发一遍**。
+ * <p>⚠️ 交接的东西是**认会话**的(见 utils/handoff.js):
+ *    对不上当前会话就不碰 —— 消息不会丢,它还在槽子里,
+ *    等用户回到那个会话时才会发出去。
+ *
+ * <p>⚠️ 发送之前先问一句「这条消息是不是已经发过了」——
+ *    判断依据是**会话历史**,不是本地标记:
+ *
+ *    <p>交接是「建会话 → 跳过去 → 拉历史 → 发消息」四步,
+ *       用户在这中间按了 F5 的话:拉历史的请求被浏览器掐断,
+ *       旧页面照样往下走 → 把消息「取走清空」了,
+ *       可发消息的请求也跟着旧页面一起没了 →
+ *       刷新后的新页面接手时槽子里已经空了,**用户的消息就这么丢了**。
+ *
+ *    <p>所以槽位不靠本地标记清空,而是等**历史里出现这条消息**(说明发出去了)再清。
+ *       新页面接手时先看历史:历史里已经有了 → 不重发;还没有 → 照发。
+ *       于是「刷新丢消息」和「刷新重发一遍」两个问题一起没了。
+ *
+ * <p>⚠️ 取消息和发消息之间**不能有 await**:
+ *    中间一旦让出事件循环,用户就可能点侧边栏切到别的会话去 ——
+ *    那样这条消息就发到别人的会话里了(而且后端记忆也会串)。
+ *    所以这里的顺序是:同步取 → 同步塞进气泡 → 才 await。
  */
 const consumeHandoff = async () => {
-  const text = handoff.message
-  const file = handoff.file
-  const preview = handoff.previewUrl
+  const uuid = chatId.value
 
-  if (!text && !file) return
+  const handoff = peekHandoff(uuid)
+  if (!handoff) return
 
-  // 先清空,防止 sendMessage 过程中再触发一次
-  handoff.message = ''
-  handoff.file = null
-  handoff.previewUrl = ''
-
-  if (file) {
-    // 看图说话:图片已经在首页压缩好了,直接用
-    mode.value = 'vision'
-    // 预览地址的所有权从首页转到这里 —— 首页那边已经不再回收它了
-    adoptImage({ file, previewUrl: preview })
-    message.value = text
-    await sendVisionMessage()
+  // 历史里已经有这条消息了 → 之前那次发送其实成功了(页面中途被刷新过)
+  // ⚠️ 这个会话是刚建的(建会话只占个坑,不存消息),
+  //    所以历史里出现同一条用户消息,就是「这条已经发过了」。
+  if (
+    handoff.message &&
+    chatList.value.some((c) => c.role === 'user' && c.content === handoff.message)
+  ) {
+    clearHandoff()
     return
   }
 
-  message.value = text
-  await sendTextMessage()
+  if (handoff.file) {
+    // 看图说话:图片已经在首页压缩好了,直接用
+    mode.value = 'vision'
+    // 预览地址的所有权从首页转到这里 —— 首页那边已经不再回收它了
+    adoptImage({ file: handoff.file, previewUrl: handoff.previewUrl })
+    message.value = handoff.message
+    await sendVisionMessage()
+    // ⚠️ 这条路**不管成没成都清空**:图片的 blob 地址只活到本页面结束
+    //    (组件一卸载就被回收了),留着也没法重发 —— 留着只会让下次进来时
+    //    拿着一张死链图片再发一次。
+    clearHandoff()
+    return
+  }
+
+  message.value = handoff.message
+  const ok = await sendTextMessage()
+  // ⚠️ 只有真发出去了才清空槽位:发失败(模型报错/网络断了)就留着,
+  //    下次进这个会话还能重试(历史里没有它 → 会再发一次)。
+  if (ok) clearHandoff()
 }
 
 /* ──────────────────────────────────────────────────────────────────────
@@ -408,6 +441,7 @@ const stopStream = () => {
  *
  * @param {string} userMessage 用户提问原文
  * @param {number} replyIndex  要写入的回复消息下标
+ * @returns {Promise<boolean>} 这一轮是不是正常走完了(出错/被掐断 = false)
  */
 const startStream = async (userMessage, replyIndex) => {
   // 通过 chatList 取（而不是直接持有 push 进去的原始对象）才能触发 Vue 响应式更新
@@ -417,6 +451,9 @@ const startStream = async (userMessage, replyIndex) => {
 
   const controller = new AbortController()
   streamController = controller
+
+  // 这一轮是否正常走完 —— 交接那边要靠它决定「消息算不算发出去了」
+  let completed = false
 
   try {
     // ⚠️ URL 由接口层拼(api/conversation.js):组件里不出现任何后端地址,
@@ -477,6 +514,8 @@ const startStream = async (userMessage, replyIndex) => {
       target.content = serverError || '抱歉，模型这次没返回内容，请再试一次。'
       target.failed = '' // 原因已经当正文了,别再在下面显示一遍
     }
+    // ⚠️ 走完了,但后端报告过失败(event:error)→ 不算成功
+    completed = !serverError
   } catch (e) {
     const target = reply()
     if (!target) return
@@ -505,6 +544,7 @@ const startStream = async (userMessage, replyIndex) => {
     // 侧边栏的会话列表要跟着更新(标题、消息数、最后更新时间)
     loadChats({ reset: true })
   }
+  return completed
 }
 
 /**
@@ -609,10 +649,12 @@ const sendMessage = async () => {
 
 /**
  * 发一条纯文字提问
+ *
+ * @returns {Promise<boolean>} 这一轮是不是正常走完了
  */
 const sendTextMessage = async () => {
   const userMessage = message.value.trim()
-  if (!userMessage) return
+  if (!userMessage) return false
 
   // 标记为发送中（按钮置灰、避免重复发送）
   isSending.value = true
@@ -636,7 +678,7 @@ const sendTextMessage = async () => {
   // 强制滚到底：用户刚发了消息，无条件跟随
   scrollToBottom(true)
 
-  await startStream(userMessage, replyIndex)
+  return startStream(userMessage, replyIndex)
 }
 
 /**

@@ -164,14 +164,15 @@ const activeUuid = computed(() => route.params?.uuid || '')
 /** 回首页(新对话) */
 const goHome = () => {
   emit('close')
-  router.push('/')
+  // ⚠️ 用命名路由,别写死路径 —— 路径改了这里不会跟着改
+  router.push({ name: 'home' })
 }
 
 /** 打开某个会话 */
 const openChat = (uuid) => {
   emit('close')
   if (uuid === activeUuid.value) return
-  router.push(`/chat/${uuid}`)
+  router.push({ name: 'chat', params: { uuid } })
 }
 
 /** 加载更早的会话 */
@@ -205,7 +206,7 @@ const doDelete = async (uuid) => {
     const ok = await removeChat(uuid)
     if (!ok) return
     if (uuid === activeUuid.value) {
-      router.push('/')
+      router.push({ name: 'home' })
     }
   } catch (e) {
     console.error('删除失败: ', e)

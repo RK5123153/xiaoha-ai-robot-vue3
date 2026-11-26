@@ -5,14 +5,14 @@
  * <ul>
  *   <li><b>左边栏和主内容区是两个组件</b>(Layout.vue / ChatPage.vue),
  *       但「当前有哪些会话」「选了哪个模型」是两份都要知道的东西。</li>
- *   <li><b>首页 → 聊天页要交接一条消息</b>:
- *       用户在首页输入框打了一句话,点发送后要跳到聊天页并把这句话发出去。
- *       走 URL 不合适(长文本 + 中文 + 转义),走组件 props 也不行(跨路由了),
- *       所以放在这里,聊天页 mount 时取走。</li>
  * </ul>
  *
  * <p>没有引 Pinia —— 这个项目一共就这两个页面,
  * 一个 reactive 对象 + 几个函数完全够用,不值得为它加一个依赖。
+ *
+ * <p>「首页 → 聊天页交接一条消息」不在这里 ——
+ *    它是**一次性**的数据(取走就没了),不是需要长期共享的状态,
+ *    放在 utils/handoff.js 里(一个认会话的槽位 + sessionStorage 备份)。
  */
 
 import { reactive, computed } from 'vue'
@@ -70,20 +70,6 @@ export const toolState = reactive({
 
 /** 工具勾选状态存在 localStorage 的哪个键下 */
 const TOOLS_STORAGE_KEY = 'xiaoha-ai-robot.tools'
-
-/**
- * 首页 → 聊天页 的消息交接
- *
- * <p>用完就清空(set to ''),不然下次进聊天页会**把上一条消息又发一遍**。
- */
-export const handoff = reactive({
-  /** 要在聊天页发出的消息 */
-  message: '',
-  /** 要在聊天页发出的图片(看图说话) */
-  file: null,
-  /** 那张图的预览地址(blob: URL)—— 聊天页拿去显示缩略图 */
-  previewUrl: '',
-})
 
 /**
  * 一串连续的百分号转义(%E8%AE%B0 这种)→ 还原成文字

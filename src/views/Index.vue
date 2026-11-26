@@ -66,7 +66,8 @@ import ChatInputBox from '@/components/ChatInputBox.vue'
 import DisclaimerBar from '@/components/DisclaimerBar.vue'
 import { conversationApi } from '@/api/conversation.js'
 import { useAttachment } from '@/utils/attachment.js'
-import { handoff, genUuid } from '@/utils/chat-store.js'
+import { genUuid } from '@/utils/chat-store.js'
+import { sendToChat } from '@/utils/handoff.js'
 
 const router = useRouter()
 
@@ -121,10 +122,12 @@ const useSuggestion = async (s) => {
  *   顺手就让左边栏出现这条会话 —— 用户能立刻看到「刚才那条被存下来了」。
  *
  * <p>⚠️ 建会话**不会**把这条消息存进消息表(它只是先占个坑),
- *    真正把消息发出去是聊天页的事。所以消息是通过 handoff 交接过去的。
+ *    真正把消息发出去是聊天页的事。所以消息是「交接」过去的
+ *    (交接细节见 utils/handoff.js)。
  *
- * <p>⚠️ 交接的内容要**等建完会话再填**:填早了的话,
- *    用户在这中间点了侧边栏别的会话,那条消息就会发到别的会话里去。
+ * <p>⚠️ 交接要**等建完会话再交**:交接的内容是认会话的(带 chatId),
+ *    填早了的话还不知道该发给哪个会话;而且用户在这中间点了侧边栏别的会话,
+ *    那条消息就会发到别的会话里去。
  */
 const send = async () => {
   if (sendState.value.disabled) return
@@ -146,18 +149,20 @@ const send = async () => {
   }
   if (!uuid) uuid = genUuid()
 
-  // 把要发的东西交给聊天页
-  handoff.message = text
-  handoff.file = file ? file.file : null
-  handoff.previewUrl = file ? file.previewUrl : ''
-
   // ⚠️ 预览地址的所有权交给聊天页 —— 这边就不能再回收了,
   //    不然组件一卸载(跳转)就把 URL revoke 掉,聊天页的缩略图会变裂图。
+  //    必须在跳转**之前**交出去:跳转完这个组件就卸载了。
   if (file) detachPreviewUrl(file.previewUrl)
 
   message.value = ''
   attachment.value = null
 
-  router.push(`/chat/${uuid}`)
+  // 跳到聊天页,并把这条消息带过去
+  sendToChat(router, {
+    uuid,
+    message: text,
+    file: file ? file.file : null,
+    previewUrl: file ? file.previewUrl : '',
+  })
 }
 </script>

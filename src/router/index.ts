@@ -5,6 +5,12 @@ import Layout from '@/layouts/Layout.vue'
 //
 // 嵌套路由:Layout 是「壳」(左边栏 + 主内容区),真正的页面放在它的 children 里。
 // 这样切页面时侧边栏不会跟着卸载 —— 聊天记录列表、滚动位置、模型选择都还在。
+//
+// ⚠️ 跳转一律用**命名路由**(router.push({ name: 'chat', params: { uuid } })),
+//    别写死路径 —— 路径改了(比如 /chat/:uuid → /c/:id),写死的地方会静悄悄地跳错。
+//
+// ⚠️ 首页 → 聊天页要交接的那条消息,不走 URL、也不走路由 state,
+//    走 utils/handoff.js(一个认会话的槽位 + sessionStorage 备份)。
 const routes = [
     {
         path: '/', // 路由地址
