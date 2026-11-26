@@ -75,9 +75,17 @@
 import { ref, watch, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import Sidebar from '@/components/Sidebar.vue'
-import { chatState, loadChats, loadModels, loadTools } from '@/utils/chat-store.js'
+import { useSessionStore } from '@/stores/sessions.js'
+import { useModelStore } from '@/stores/model.js'
+import { useToolStore } from '@/stores/tools.js'
+import { safeGetItem, safeSetItem } from '@/utils/storage.js'
 
 const route = useRoute()
+
+/** 三个 store:会话列表 / 模型选择 / 工具开关(全局共享,首页和聊天页是同一份) */
+const sessionStore = useSessionStore()
+const modelStore = useModelStore()
+const toolStore = useToolStore()
 
 /**
  * 桌面端:侧边栏是不是收起来了
@@ -97,28 +105,26 @@ const drawerOpen = ref(false)
 /** 折叠状态存在 localStorage 里 —— 刷新后还保持用户的选择 */
 const COLLAPSED_STORAGE_KEY = 'xiaoha-ai-robot.sidebar-collapsed'
 
-/** 切换桌面端侧边栏的收缩/展开 */
+/**
+ * 切换桌面端侧边栏的收缩/展开
+ *
+ * <p>用 utils/storage.js 那套(读不到/写不进去都不抛)——
+ *    隐私模式下 localStorage 可能整个不可用,直接 localStorage.setItem 会把
+ *    「点一下折叠按钮」变成「页面报错」。
+ */
 const toggleCollapsed = () => {
   collapsed.value = !collapsed.value
-  try {
-    localStorage.setItem(COLLAPSED_STORAGE_KEY, collapsed.value ? '1' : '0')
-  } catch {
-    // 隐私模式下 localStorage 可能不可写 → 忽略,只是这次不记住而已
-  }
+  safeSetItem(COLLAPSED_STORAGE_KEY, collapsed.value ? '1' : '0')
 }
 
 onMounted(() => {
-  // 读回上次的选择
-  try {
-    collapsed.value = localStorage.getItem(COLLAPSED_STORAGE_KEY) === '1'
-  } catch {
-    collapsed.value = false
-  }
-  loadChats({ reset: true })
-  loadModels()
+  // 读回上次的选择(读不到就当没折叠过)
+  collapsed.value = safeGetItem(COLLAPSED_STORAGE_KEY) === '1'
+  sessionStore.loadChats({ reset: true })
+  modelStore.loadModels()
   // 工具清单整个应用只拉这一次 —— 首页和聊天页共用一份勾选状态。
-  // ⚠️ 别在页面里再拉一遍:会用 localStorage 里的旧值覆盖用户刚做的勾选。
-  loadTools()
+  // ⚠️ 别在页面里再拉一遍:会用存着的旧值覆盖用户刚做的勾选。
+  toolStore.loadTools()
 })
 
 /**
@@ -134,6 +140,6 @@ onMounted(() => {
  */
 watch(
   () => route.params?.uuid || route.path,
-  () => loadChats({ reset: true })
+  () => sessionStore.loadChats({ reset: true })
 )
 </script>

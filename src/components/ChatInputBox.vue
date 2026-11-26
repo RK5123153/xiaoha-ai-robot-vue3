@@ -59,8 +59,16 @@
     -->
     <div class="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1.5">
       <div class="flex items-center gap-2 flex-wrap min-w-0">
-        <ModelPicker />
-        <WebSearchToggle />
+        <!--
+          ⚠️ 模型选择和联网搜索只在**文字对话**里有意义:
+             看图说话那条链路(/v9)后端不接模型、也不接联网搜索参数,
+             摆在这儿就是个「点了没反应」的假开关 —— 用户选了以为生效了,其实没有。
+             所以那条模式下整个藏起来。
+        -->
+        <template v-if="showModel">
+          <ModelPicker />
+          <WebSearchToggle />
+        </template>
       </div>
 
       <div class="flex items-center gap-2 ml-auto">
@@ -149,6 +157,16 @@ const props = defineProps({
   },
   /** 要不要显示工具开关 */
   showTools: {
+    type: Boolean,
+    default: true,
+  },
+  /**
+   * 要不要显示「模型选择 + 联网搜索」
+   *
+   * <p>看图说话那条链路不接这两个参数(后端那边是多模态专用接口),
+   *    摆出来就是个假开关 —— 所以那条模式下传 false 藏起来。
+   */
+  showModel: {
     type: Boolean,
     default: true,
   },

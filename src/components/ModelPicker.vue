@@ -42,7 +42,8 @@
 
 <script setup>
 import { computed, ref } from 'vue'
-import { modelState, selectModel } from '@/utils/chat-store.js'
+import { storeToRefs } from 'pinia'
+import { useModelStore } from '@/stores/model.js'
 
 /**
  * 「默认模型」这一项在 Menu 里用的 key
@@ -52,12 +53,27 @@ import { modelState, selectModel } from '@/utils/chat-store.js'
  */
 const DEFAULT_KEY = '__default__'
 
+/**
+ * 模型状态放在 store 里 —— 首页和聊天页是同一份,
+ * 而且刷新页面后用户选的那个还在(持久化,见 stores/model.js)。
+ */
+const modelStore = useModelStore()
+const { models, code } = storeToRefs(modelStore)
+
 /** 菜单是不是展开着 —— 用来转箭头 */
 const open = ref(false)
 
-/** antd 的 Dropdown 展开/收起时回调 */
+/**
+ * antd 的 Dropdown 展开/收起时回调
+ *
+ * <p>⚠️ 顺带在这里补拉一次模型清单:
+ *    · 页面刚打开时后端还没起来 → 清单是空的,用户点开只看到「默认模型」;
+ *    · 后端后来加了模型 → 用户不用刷新页面就能看到。
+ *    清单有保鲜期(见 stores/model.js),不是每次开都拉。
+ */
 const onOpenChange = (v) => {
   open.value = v
+  if (v && modelStore.isStale()) modelStore.loadModels()
 }
 
 /**
@@ -72,7 +88,7 @@ const items = computed(() => [
     name: '默认模型(后端配置)',
     description: '由后端配置决定用哪个模型',
   },
-  ...modelState.models.map((m) => ({
+  ...models.value.map((m) => ({
     key: m.code,
     name: m.name,
     description: m.description || '',
@@ -80,28 +96,28 @@ const items = computed(() => [
 ])
 
 /** 当前选中的那一项的 key */
-const selectedKey = computed(() => modelState.code || DEFAULT_KEY)
+const selectedKey = computed(() => code.value || DEFAULT_KEY)
 
 /** 按钮上显示的名字 */
 const currentLabel = computed(() => {
-  const model = modelState.models.find((m) => m.code === modelState.code)
+  const model = models.value.find((m) => m.code === code.value)
   return model?.name || '默认模型'
 })
 
 /** 当前模型的说明(鼠标悬停时显示) */
 const currentDesc = computed(() => {
-  const model = modelState.models.find((m) => m.code === modelState.code)
+  const model = models.value.find((m) => m.code === code.value)
   return model?.description || '用后端配置的默认模型'
 })
 
 /**
  * 选了某个模型
  *
- * <p>走 store 的 selectModel —— 它会顺手把「支不支持联网搜索」对齐到模型的能力,
- *    直接改 modelState.code 的话,换了不支持联网的模型,联网搜索还开着。
+ * <p>走 store 的 selectModel —— 它会把选择记下来(存进 localStorage,刷新不丢)。
+ *    ⚠️ 它**不会**去动「联网搜索」:那是用户自己的偏好,和用哪个模型是两件事。
  */
 const onSelect = ({ key }) => {
-  selectModel(key === DEFAULT_KEY ? '' : key)
+  modelStore.selectModel(key === DEFAULT_KEY ? '' : key)
 }
 </script>
 

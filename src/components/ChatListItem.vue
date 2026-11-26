@@ -95,7 +95,7 @@ import { ref, nextTick, watch } from 'vue'
  * 侧边栏里的一个会话
  *
  * <p>三件事:显示标题、改名、删除。
- * 具体的请求在 store 里(utils/chat-store.js),这里只管交互和发事件。
+ * 具体的请求在 store 里(stores/sessions.js),这里只管交互和发事件。
  */
 const props = defineProps({
   /** 会话:{ uuid, id, title } */

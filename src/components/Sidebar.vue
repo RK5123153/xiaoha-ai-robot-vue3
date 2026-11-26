@@ -81,12 +81,12 @@
       <!-- 会话列表 -->
       <div class="flex-1 min-h-0 overflow-y-auto px-3 pb-3 chat-scroll">
         <!-- 列表加载中 -->
-        <p v-if="chatState.loading && !chatState.chats.length" class="px-3 py-2 text-xs text-gray-400">
+        <p v-if="loading && !chats.length" class="px-3 py-2 text-xs text-gray-400">
           正在加载对话…
         </p>
 
         <!-- 一个会话都没有 -->
-        <p v-else-if="!chatState.chats.length" class="px-3 py-2 text-xs text-gray-400 leading-5">
+        <p v-else-if="!chats.length" class="px-3 py-2 text-xs text-gray-400 leading-5">
           还没有对话。在右边问一句,就会自动出现在这里。
         </p>
 
@@ -108,13 +108,13 @@
 
         <!-- 还有更早的会话 -->
         <button
-          v-if="chatState.hasMore"
+          v-if="hasMore"
           type="button"
           class="w-full py-2 text-xs text-gray-400 hover:text-[#4d6bfe] transition-colors disabled:opacity-50"
-          :disabled="chatState.loading"
+          :disabled="loading"
           @click="loadMore"
         >
-          {{ chatState.loading ? '加载中…' : '加载更多' }}
+          {{ loading ? '加载中…' : '加载更多' }}
         </button>
       </div>
 
@@ -135,16 +135,15 @@
 
 <script setup>
 import { computed } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useRoute, useRouter } from 'vue-router'
 import ChatListItem from '@/components/ChatListItem.vue'
 import BrandLogo from '@/components/BrandLogo.vue'
-import {
-  chatState,
-  groupedChats,
-  loadChats,
-  removeChat,
-  renameChat,
-} from '@/utils/chat-store.js'
+import { useSessionStore } from '@/stores/sessions.js'
+
+/** 会话列表放在 store 里 —— 侧边栏和聊天页都要知道「有哪些会话」 */
+const sessionStore = useSessionStore()
+const { chats, loading, hasMore, groupedChats } = storeToRefs(sessionStore)
 
 const props = defineProps({
   /** 桌面端是不是收起来了 */
@@ -177,8 +176,8 @@ const openChat = (uuid) => {
 
 /** 加载更早的会话 */
 const loadMore = () => {
-  if (chatState.loading || !chatState.hasMore) return
-  loadChats()
+  if (loading.value || !hasMore.value) return
+  sessionStore.loadChats()
 }
 
 /**
@@ -189,10 +188,10 @@ const loadMore = () => {
  */
 const doRename = async (id, summary) => {
   try {
-    await renameChat(id, summary)
+    await sessionStore.renameChat(id, summary)
   } catch (e) {
     console.error('改名失败: ', e)
-    loadChats({ reset: true })
+    sessionStore.loadChats({ reset: true })
   }
 }
 
@@ -203,7 +202,7 @@ const doRename = async (id, summary) => {
  */
 const doDelete = async (uuid) => {
   try {
-    const ok = await removeChat(uuid)
+    const ok = await sessionStore.removeChat(uuid)
     if (!ok) return
     if (uuid === activeUuid.value) {
       router.push({ name: 'home' })

@@ -4,10 +4,25 @@ import { createApp } from 'vue'
 import App from './App.vue'
 // 这里起别名:页面里已经有叫 message 的变量(输入框的草稿)
 import { message as antMessage } from 'ant-design-vue'
+// 全局状态管理(Pinia)—— 模型选择 / 联网搜索 / 工具开关 这些跨页面共享的状态
+import { createPinia } from 'pinia'
+// 持久化插件:把「用户的选择」(选了哪个模型、开没开联网)存进 localStorage
+import piniaPluginPersistedstate from 'pinia-plugin-persistedstate'
 
 // 导入路由
 import router from './router'
 const app = createApp(App)
+
+/**
+ * Pinia
+ *
+ * <p>⚠️ 插件必须在 app.use(pinia) **之前**挂上:
+ *    插件是在 store **第一次被创建**时跑的,那时它已经把 state 从
+ *    localStorage 读回来写进 store 了 —— 挂晚了,头一个 store 读不到存着的值。
+ */
+const pinia = createPinia()
+pinia.use(piniaPluginPersistedstate)
+app.use(pinia)
 
 // 应用路由
 app.use(router)

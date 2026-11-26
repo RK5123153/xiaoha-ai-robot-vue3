@@ -18,16 +18,17 @@ export const modelApi = {
    *   webSearch   这个模型支不支持联网搜索
    * </pre>
    *
-   * @returns {Promise<Array<object>>} 模型清单;拿不到时返回空数组
+   * @returns {Promise<Array<object>>} 模型清单
+   *
+   * <p>⚠️ 失败时**抛出去**,不吞掉:
+   *    「后端挂了(等下再拉)」和「后端确实一个模型都没配」是两回事 ——
+   *    吞掉的话上层分不出,只能一律当成「没有可选模型」,
+   *    于是用户打开下拉框看到空菜单,却不知道为什么(其实后端还没起来)。
+   *    上层(store)拿到异常后可以不置「已加载」标记,等用户打开下拉框时再拉一次。
    */
   async list() {
-    try {
-      const payload = await getJson(`${API_BASE}/v13/models`)
-      const data = unwrap(payload)
-      return Array.isArray(data) ? data : []
-    } catch {
-      // 后端没这个接口 / 网络不通 → 当作「没有可选模型」,前端用默认模型
-      return []
-    }
+    const payload = await getJson(`${API_BASE}/v13/models`)
+    const data = unwrap(payload)
+    return Array.isArray(data) ? data : []
   },
 }

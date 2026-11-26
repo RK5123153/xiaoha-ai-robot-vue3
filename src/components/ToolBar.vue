@@ -8,10 +8,10 @@
        之前它只写在聊天页里,于是从首页发消息时用户根本没机会勾工具 ——
        首页的推荐问题写着「需要勾选天气工具」,可页面上根本没有那个开关。
   -->
-  <div v-if="toolState.list.length" class="tool-bar">
+  <div v-if="list.length" class="tool-bar">
     <span class="tool-bar-label">工具</span>
     <a-tooltip
-      v-for="t in toolState.list"
+      v-for="t in list"
       :key="t.name"
       placement="top"
       :title="t.available === false ? (t.unavailableReason || t.description) : t.description"
@@ -19,16 +19,24 @@
       <button
         type="button"
         class="chip"
-        :class="{ 'is-on': toolState.selected.includes(t.name), 'is-off': t.available === false }"
+        :class="{ 'is-on': selected.includes(t.name), 'is-off': t.available === false }"
         :aria-disabled="t.available === false"
-        @click="toggleTool(t.name)"
+        @click="toolStore.toggleTool(t.name)"
       >{{ t.label || t.name }}</button>
     </a-tooltip>
   </div>
 </template>
 
 <script setup>
-import { toolState, toggleTool } from '@/utils/chat-store.js'
+import { storeToRefs } from 'pinia'
+import { useToolStore } from '@/stores/tools.js'
+
+/**
+ * 工具勾选状态放在 store 里 —— 首页和聊天页共用同一份,
+ * 而且刷新页面后还是勾着的(持久化,见 stores/tools.js)。
+ */
+const toolStore = useToolStore()
+const { list, selected } = storeToRefs(toolStore)
 
 /**
  * 不可用的工具(比如 GitHub 没配 PAT):灰着、点不动 —— 鼠标悬停能看到原因。

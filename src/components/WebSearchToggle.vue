@@ -22,10 +22,18 @@
 
 <script setup>
 import { computed } from 'vue'
-import { modelState } from '@/utils/chat-store.js'
+import { storeToRefs } from 'pinia'
+import { useModelStore } from '@/stores/model.js'
+
+/**
+ * 联网搜索开关的状态放在 store 里 —— 首页和聊天页共用同一份,
+ * 而且刷新页面后还是开着(持久化,见 stores/model.js)。
+ */
+const modelStore = useModelStore()
+const { webSearch } = storeToRefs(modelStore)
 
 /** 开着没有 */
-const on = computed(() => modelState.webSearch)
+const on = computed(() => webSearch.value)
 
 /**
  * 当前选的模型支不支持联网搜索
@@ -33,7 +41,7 @@ const on = computed(() => modelState.webSearch)
  * <p>code 为空(用后端配的默认模型)时不知道 → 当作支持。
  */
 const unsupported = computed(() => {
-  const model = modelState.models.find((m) => m.code === modelState.code)
+  const model = modelStore.models.find((m) => m.code === modelStore.code)
   return !!model && model.webSearch === false
 })
 
@@ -46,6 +54,6 @@ const tip = computed(() => {
 
 /** 开 / 关 —— 只改用户自己的偏好,跟选了哪个模型无关 */
 const toggle = () => {
-  modelState.webSearch = !modelState.webSearch
+  modelStore.toggleWebSearch()
 }
 </script>

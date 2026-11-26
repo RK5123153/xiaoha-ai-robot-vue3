@@ -66,8 +66,9 @@ import ChatInputBox from '@/components/ChatInputBox.vue'
 import DisclaimerBar from '@/components/DisclaimerBar.vue'
 import { conversationApi } from '@/api/conversation.js'
 import { useAttachment } from '@/utils/attachment.js'
-import { genUuid } from '@/utils/chat-store.js'
+import { genUuid } from '@/utils/uuid.js'
 import { sendToChat } from '@/utils/handoff.js'
+import { useDraft } from '@/composables/useDraft.js'
 
 const router = useRouter()
 
@@ -79,8 +80,14 @@ const suggestions = [
   { title: '在 GitHub 上找找热门的 Vue 项目', desc: '先在下面勾上「GitHub」工具' },
 ]
 
-/** 输入框里的草稿 */
-const message = ref('')
+/**
+ * 输入框里的草稿
+ *
+ * <p>首页还不是一个会话,所以用 'home' 当它的标识 ——
+ *    草稿存在本地,刷新页面也不丢(手快按一下 F5,打的字不会白打)。
+ */
+const HOME_SCOPE = 'home'
+const { text: message } = useDraft(ref(HOME_SCOPE))
 
 /** 输入框组件(要拿它的 focus) */
 const inputRef = ref(null)

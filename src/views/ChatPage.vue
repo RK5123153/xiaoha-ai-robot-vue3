@@ -106,7 +106,8 @@
           :placeholder="mode === 'vision' ? '描述这张图…（留空就让模型自己描述）' : '给小哈 AI 机器人发送消息（Enter 发送，Shift + Enter 换行）'"
           :allow-image="mode === 'vision'"
           :show-tools="mode === 'text'"
-          :hint="mode === 'vision' ? '看图说话是「一张图 + 一个问题」的独立问答，不带聊天记忆' : ''"
+          :show-model="mode === 'text'"
+          :hint="mode === 'vision' ? '看图说话是「一张图 + 一个问题」的独立问答，不带聊天记忆，用后端配置的多模态模型' : ''"
           @send="sendMessage"
           @pick-image="pickImage"
           @remove-image="removeImage"
@@ -138,11 +139,27 @@ import { conversationApi } from '@/api/conversation.js'
 import { feedbackApi } from '@/api/chat.js'
 import { useAttachment } from '@/utils/attachment.js'
 import { sendVisionStream, DEFAULT_QUESTION } from '@/utils/vision.js'
-import { loadChats, modelState, toolsParam, resolveWebSearch } from '@/utils/chat-store.js'
+import { useSessionStore } from '@/stores/sessions.js'
+import { useModelStore } from '@/stores/model.js'
+import { useToolStore } from '@/stores/tools.js'
+import { useDraft } from '@/composables/useDraft.js'
 import { peekHandoff, clearHandoff } from '@/utils/handoff.js'
 import DisclaimerBar from '@/components/DisclaimerBar.vue'
 
 const route = useRoute()
+
+/**
+ * 全局状态(store 里):会话列表 / 模型选择 / 工具开关
+ *
+ * <p>⚠️ 这里**不**把状态通过 emit 传给输入框组件:
+ *    教程里那种「子组件 emit 一份 payload 给父组件」的做法在这儿是倒退 ——
+ *    父组件拿到的会是一份**拷贝**,用户改了设置(比如在输入框里换了模型)
+ *    父组件手里那份还是旧的,发请求时用的就是旧值。
+ *    直接读 store:发请求那一刻读到的永远是**当前**的值。
+ */
+const sessionStore = useSessionStore()
+const modelStore = useModelStore()
+const toolStore = useToolStore()
 
 /** 两种对话模式。kind 会记在每条消息上，用来决定走哪条后端链路 */
 const MODES = [
@@ -164,7 +181,7 @@ const chatId = computed(() => route.params?.uuid || '')
 /** 历史消息加载中 */
 const loadingHistory = ref(false)
 
-/* 工具开关的状态在 store 里(utils/chat-store.js):首页和聊天页共用同一份勾选。 */
+/* 工具开关的状态在 store 里(stores/tools.js):首页和聊天页共用同一份勾选。 */
 /* ──────────────────────────────────────────────────────────────────────
  * 输入框
  *
@@ -173,7 +190,16 @@ const loadingHistory = ref(false)
  *    以及发出去之后干什么。
  * ────────────────────────────────────────────────────────────────────── */
 
-const message = ref('')
+/**
+ * 草稿:每个会话各存各的,刷新页面也不丢
+ *
+ * <p>⚠️ 为什么不能直接用 `ref('')`:
+ *   路由切会话时页面组件是**复用**的(同一个组件,只是参数变了),
+ *   所以输入框里的文字会原样跟到下一个会话去 ——
+ *   在会话 A 里写「帮我查天气」,点侧边栏切到 B,按发送,这句话就发到 B 里了。
+ *   草稿跟着会话走,才不会串。
+ */
+const { text: message } = useDraft(chatId)
 /** 输入框组件(要拿它的 focus) */
 const inputRef = ref(null)
 const chatScrollRef = ref(null)
@@ -466,15 +492,15 @@ const startStream = async (userMessage, replyIndex) => {
     //    发 networkSearch=true 后端会直接 400(它不静默降级),
     //    所以这里降级成 false,同时告诉用户「本次没联网」,
     //    别让人以为「开了却没搜」是模型能力之外的事。
-    const webSearch = resolveWebSearch()
+    const webSearch = modelStore.webSearchStatus
     if (webSearch.reason) antMessage.info(webSearch.reason)
 
     const res = await conversationApi.completion({
       message: userMessage,
       chatId: chatId.value,
-      modelName: modelState.code,
+      modelName: modelStore.code,
       networkSearch: webSearch.enabled,
-      tools: toolsParam.value,
+      tools: toolStore.toolsParam,
       signal: controller.signal,
     })
 
@@ -542,7 +568,7 @@ const startStream = async (userMessage, replyIndex) => {
     if (streamController === controller) streamController = null
     isSending.value = false
     // 侧边栏的会话列表要跟着更新(标题、消息数、最后更新时间)
-    loadChats({ reset: true })
+    sessionStore.loadChats({ reset: true })
   }
   return completed
 }
