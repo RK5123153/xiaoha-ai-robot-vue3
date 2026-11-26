@@ -16,9 +16,9 @@ import {
   getJson,
   postJson,
   query,
-  readErrorMessage,
   unwrap,
 } from './base.js'
+import { streamSse } from '@/utils/sse.js'
 
 /** 新栈:会话管理 —— /chat/** */
 const CONVERSATION_BASE = `${API_BASE}/chat`
@@ -167,11 +167,11 @@ export const conversationApi = {
    * 发一条消息,拿流式回复
    *
    * <p>⚠️ 这是 **POST**,所以不能用 EventSource(它只能发 GET)——
-   *    必须 fetch + ReadableStream 自己读 SSE(帧解析在 utils/sse.js)。
+   *    走的是 utils/sse.js 里那层(基于 @microsoft/fetch-event-source)。
    *
    * <p>⚠️ 失败(HTTP 非 2xx)时后端返回的是**普通 JSON 错误体**,不是 SSE:
    *    比如模型没配 key 会返回 503 + {"message":"provider 'deepseek' 没有配置 API key..."}。
-   *    所以这里先把非 2xx 转成 Error 抛出去,别去读流(读了也是空的,还看不出原因)。
+   *    sse.js 那层会把这条原因挖出来原样抛出去。
    *
    * @param {object} params
    * @param {string} params.message 问什么
@@ -181,7 +181,8 @@ export const conversationApi = {
    * @param {number} [params.temperature]
    * @param {string} [params.tools] 要开启的工具(逗号分隔;none = 全关;空 = 后端默认)
    * @param {AbortSignal} [params.signal]
-   * @returns {Promise<Response>} 交给调用方读 SSE 流
+   * @param {(frame: {event: string, data: string}) => void} params.onFrame 每帧回调
+   * @returns {Promise<void>} 流结束才 resolve
    */
   async completion({
     message,
@@ -191,6 +192,7 @@ export const conversationApi = {
     temperature,
     tools = '',
     signal,
+    onFrame,
   }) {
     const body = { message }
     if (chatId) body.chatId = chatId
@@ -199,41 +201,13 @@ export const conversationApi = {
     if (typeof temperature === 'number') body.temperature = temperature
     if (tools) body.tools = tools
 
-    const res = await fetchWithTimeout(
-      `${CONVERSATION_BASE}/completion`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          // ⚠️ **故意不带** `Accept: text/event-stream`
-          //
-          // 后端已经修好了:错误响应恒为 application/json(见后端 ApiExceptionHandler#json),
-          // 带不带这个头都能拿到失败原因。
-          // 但这里仍然不发 —— 万一前端先于后端更新上线,老后端带 Accept 时会返回
-          // 503 + 空 body,失败原因就又看不见了。不带这个头,新老后端都能拿到原因。
-          //
-          // (读 SSE 本来也不需要它:响应类型由后端的 produces 决定,
-          //  字节流是我们自己按帧拆的,见 utils/sse.js)
-        },
-        body: JSON.stringify(body),
-      },
-      // ⚠️ 这个超时只覆盖「连上 + 拿到响应头」这一段:
-      //    fetch 一拿到响应头就 resolve,正文是之后慢慢读的
-      //    (正文阶段的保护在 utils/sse.js 的空闲超时里)。
-      { signal }
-    ).catch((e) => {
-      // 网络层面的失败(后端没起、端口不通、跨域被拒)—— fetch 自己就抛了,
-      // 上面那套「读错误体」的逻辑根本走不到。
-      // ⚠️ AbortError 是「我们自己掐断的」(切会话/离开页面),原样抛出去:
-      //    上层靠 e.name 区分「取消」和「出错」,翻译了就认不出来了。
-      if (e.name === 'AbortError') {
-        throw e;
-      }
-      // 超时已经有专门的人话文案了,别再翻译成「网络连接失败」
-      if (e?.message?.includes('请求超时')) throw e
-      throw new Error('网络连接失败,请检查后端服务是否在运行');
+    await streamSse({
+      url: `${CONVERSATION_BASE}/completion`,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal,
+      onFrame,
     })
-    if (!res.ok) throw new Error(await readErrorMessage(res))
-    return res
   },
 }

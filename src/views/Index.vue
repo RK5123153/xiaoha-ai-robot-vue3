@@ -1,20 +1,21 @@
 <template>
   <div class="flex-1 flex flex-col overflow-hidden">
-    <!-- 中间的欢迎区 -->
+    <!--
+      中间的欢迎区(参考 DeepSeek 的「新对话」页):
+      标题居中 + 示例问题卡片,输入框钉在底部。
+    -->
     <div class="flex-1 min-h-0 flex flex-col items-center justify-center px-4 pt-6">
       <div class="w-full max-w-2xl">
-        <div class="flex items-center gap-3">
-          <div class="w-11 h-11 rounded-full flex items-center justify-center border border-gray-200 shrink-0">
-            <BrandLogo class="w-6 h-6" />
-          </div>
-          <div>
-            <h1 class="text-xl sm:text-2xl font-semibold text-gray-900">你好，我是小哈 AI 助手 ✨</h1>
-            <p class="text-sm text-gray-500 mt-0.5">问问题、查天气、翻代码 —— 想聊点什么？</p>
-          </div>
+        <div class="flex flex-col items-center text-center">
+          <BrandLogo class="w-12 h-12" />
+          <h1 class="text-2xl sm:text-3xl font-semibold text-gray-900 mt-4">
+            你好，我是小哈 AI 助手 ✨
+          </h1>
+          <p class="text-sm text-gray-500 mt-2">问问题、查天气、翻代码 —— 想聊点什么？</p>
         </div>
 
         <!-- 常用问题:点一下填进输入框(不直接发送,让人改一改再发) -->
-        <div class="grid sm:grid-cols-2 gap-2.5 mt-7">
+        <div class="grid sm:grid-cols-2 gap-2.5 mt-8">
           <button
             v-for="s in suggestions"
             :key="s.title"
@@ -37,9 +38,12 @@
       ⚠️ 首页原来**没有**工具开关,于是首页的推荐问题写着「需要勾选天气工具」,
          可页面上根本没那个开关 —— 用户点了才发现工具没开,AI 只能瞎答。
          现在工具开关、模型选择、联网搜索都在输入框里,首页和聊天页是同一份。
+
+      ⚠️ 宽度要和聊天页一致(max-w-3xl):两个页面的输入框长得不一样,
+         从首页跳到聊天页会「跳一下」。
     -->
     <div class="shrink-0 px-4 pb-4">
-      <div class="mx-auto w-full max-w-2xl">
+      <div class="mx-auto w-full max-w-3xl">
         <ChatInputBox
           ref="inputRef"
           v-model="message"
@@ -47,7 +51,9 @@
           :busy="preparingImage"
           :send-disabled="sendState.disabled"
           :send-hint="sendState.hint"
-          allow-image
+          :vision="!!attachment"
+          placeholder="给小哈 AI 机器人发送消息（Enter 发送，Shift + Enter 换行）"
+          :hint="attachment ? '看图问答：本次不带聊天记忆，回答也不写入会话历史' : ''"
           @send="send"
           @pick-image="pickImage"
           @remove-image="removeImage"

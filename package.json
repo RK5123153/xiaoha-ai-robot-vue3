@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@ant-design/icons-vue": "^7.0.1",
+    "@microsoft/fetch-event-source": "^2.0.1",
     "@tailwindcss/vite": "^4.3.3",
     "ant-design-vue": "^4.2.6",
     "fast-glob": "^3.3.3",

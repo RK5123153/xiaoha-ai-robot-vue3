@@ -1,5 +1,10 @@
 <template>
-  <a-dropdown placement="bottomLeft" :trigger="['click']" @open-change="onOpenChange">
+  <a-dropdown
+    placement="bottomLeft"
+    :trigger="['click']"
+    :disabled="disabled"
+    @open-change="onOpenChange"
+  >
     <!--
       ⚠️ 触发器只能是**一个**元素(antd 的 Dropdown 会往它身上挂点击事件)。
       所以这里不要往里再套 Tooltip —— 套了的话点击事件会挂到 Tooltip 上,
@@ -8,8 +13,10 @@
     <button
       type="button"
       class="chip"
+      :class="{ 'is-off': disabled }"
       :title="currentDesc"
       aria-label="选择对话模型"
+      :aria-disabled="disabled"
       :aria-expanded="open"
     >
       <span class="truncate max-w-[110px]">{{ currentLabel }}</span>
@@ -59,6 +66,19 @@ const DEFAULT_KEY = '__default__'
  */
 const modelStore = useModelStore()
 const { models, code } = storeToRefs(modelStore)
+
+defineProps({
+  /**
+   * 置灰(这次选不了模型)
+   *
+   * <p>看图问答走的是多模态接口(/v9),后端不接 modelName ——
+   *    摆成能选的样子就是「选了没反应」的假开关。
+   */
+  disabled: {
+    type: Boolean,
+    default: false,
+  },
+})
 
 /** 菜单是不是展开着 —— 用来转箭头 */
 const open = ref(false)

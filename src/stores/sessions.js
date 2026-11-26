@@ -75,6 +75,20 @@ export const useSessionStore = defineStore('sessions', () => {
   })
 
   /**
+   * 某个会话的标题
+   *
+   * <p>侧边栏和聊天页顶栏显示的是**同一份**标题 ——
+   *    两边各算一套的话,改名的效果就只会在一边出现。
+   *
+   * @param {string} uuid
+   * @returns {string} 找不到就是空串(调用方自己给个兜底文案)
+   */
+  const titleOf = (uuid) => {
+    const chat = chats.value.find((c) => c.uuid === uuid)
+    return chat ? decodeSummary(chat.summary) : ''
+  }
+
+  /**
    * 拉会话列表
    *
    * @param {object} [params]
@@ -158,6 +172,7 @@ export const useSessionStore = defineStore('sessions', () => {
     nextCursor,
     loaded,
     groupedChats,
+    titleOf,
     loadChats,
     removeChat,
     renameChat,

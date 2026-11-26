@@ -9,7 +9,7 @@
  *   EventSource **只能发 GET**,发不了 multipart。
  *   而 GET 那条路的 `image` 参数只能是 URL / classpath / 服务器本地文件 ——
  *   浏览器里的 blob: 地址后端根本拉不到。
- *   所以这里用 fetch + ReadableStream 自己读 SSE(帧解析在 utils/sse.js)。
+ *   所以这里走 fetch + SSE(见 utils/sse.js,基于 @microsoft/fetch-event-source)。
  *
  * 后端的三个端点:
  *   POST /v9/ai/generateStream  multipart(file + message)→ SSE  ← 本文件用这个
@@ -22,9 +22,8 @@
  *   event: error    → 模型没吐出正文时补发,data 是中文原因
  */
 
-import { readErrorMessage } from '@/api/base.js'
+import { parseChunkPayload } from './sse.js'
 import { visionApi } from '@/api/vision.js'
-import { parseChunkPayload, readSseStream } from './sse.js'
 
 /** 用户什么都没说时的默认问题(后端也有一份,但这里自己给更可控) */
 export const DEFAULT_QUESTION = '请描述一下这张图片'
@@ -52,30 +51,27 @@ export const sendVisionStream = async ({
   onThinking,
   onServerError,
 }) => {
+  let text = ''
+
   // 请求本身交给接口层(它知道往哪个地址发);这里只管「读流」
-  const res = await visionApi.submit({
+  await visionApi.submit({
     file,
     message: message || DEFAULT_QUESTION,
     model,
     signal,
-  })
-
-  // HTTP 层就失败了(400 图片类型不对 / 503 模型没配 key / 500 容器超限)
-  if (!res.ok) throw new Error(await readErrorMessage(res))
-
-  let text = ''
-  await readSseStream(res, ({ event, data }) => {
-    // data 可能是 JSON 信封(现在的后端),也可能是裸文本(老后端)—— 两种都认
-    const payload = parseChunkPayload(data)
-    if (event === 'message') {
-      text += payload
-      onChunk?.(payload, text)
-    } else if (event === 'thinking') {
-      onThinking?.(payload)
-    } else if (event === 'error') {
-      // 模型一条正文都没吐出来(比如思考链把 max_tokens 吃光了)
-      onServerError?.(payload)
-    }
+    onFrame: ({ event, data }) => {
+      // data 可能是 JSON 信封(现在的后端),也可能是裸文本(老后端)—— 两种都认
+      const payload = parseChunkPayload(data)
+      if (event === 'message') {
+        text += payload
+        onChunk?.(payload, text)
+      } else if (event === 'thinking') {
+        onThinking?.(payload)
+      } else if (event === 'error') {
+        // 模型一条正文都没吐出来(比如思考链把 max_tokens 吃光了)
+        onServerError?.(payload)
+      }
+    },
   })
 
   return text

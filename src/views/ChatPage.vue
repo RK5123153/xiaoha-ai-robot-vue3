@@ -2,19 +2,16 @@
   <!-- h-dvh 动态视口高度：移动端浏览器地址栏收起/弹出时，输入框不会掉出屏幕
        overflow-hidden：页面本身不滚动，滚动交给下面的聊天区 -->
   <div class="h-full flex flex-col overflow-hidden">
-    <!-- 模式切换：文字对话(有聊天记忆) / 看图说话(无状态) -->
-    <div class="shrink-0 pt-3 flex justify-center">
-      <div class="inline-flex items-center gap-1 p-1 rounded-full bg-gray-100">
-        <button
-          v-for="m in MODES"
-          :key="m.value"
-          type="button"
-          class="mode-tab"
-          :class="{ 'is-active': mode === m.value }"
-          @click="switchMode(m.value)"
-        >{{ m.label }}</button>
-      </div>
-    </div>
+    <!--
+      ⚠️ 这里原来有一行顶栏(会话标题 + 分享)—— 现在搬到 Layout.vue 了:
+         侧边栏收起时,logo 和几个图标要挪到那一行里(参考 DeepSeek),
+         顶栏是所有页面共用的,放聊天页里接不住。
+
+      ⚠️ 这里原来还有「文字对话 / 看图说话」的模式切换 ——
+         现在**没有模式**了:一个输入框,带没带图决定走哪条链路(见 sendMessage)。
+         模式切换的代价是:看图那条路是无状态的,用户得先想清楚「我现在要干嘛」;
+         而实际使用里「顺手发张图问问」是常态 —— 让用户先切模式是白加的一步。
+    -->
 
     <!-- 聊天记录区域：自己滚动，输入框始终钉在底部 -->
     <div
@@ -43,16 +40,25 @@
               @click="openPreview(chat.image)"
             />
             <p class="whitespace-pre-wrap break-words">{{ chat.content }}</p>
+            <!--
+              看图问答的说明 —— 这条走的是无状态的多模态接口:
+              不带聊天记忆,回答也不写进会话历史(刷新就没了)。
+              不标出来的话,用户会以为它和其它消息一样「存下了」。
+            -->
+            <p v-if="chat.kind === 'vision'" class="text-[11px] text-gray-400 mt-1">
+              看图问答 · 不写入会话历史
+            </p>
           </div>
         </div>
 
         <!-- 大模型回复消息（靠左） -->
         <div v-else class="flex items-start mb-4">
-          <!-- 头像 -->
-          <div class="flex-shrink-0 mr-3">
-            <div class="w-8 h-8 rounded-full flex items-center justify-center border border-gray-200">
-              <BrandLogo class="w-5 h-5" />
-            </div>
+          <!--
+            头像:小一点、去掉那圈描边。
+            参考图里助手的消息是不带气泡的,标识越轻越好 —— 一圈描边反而抢眼。
+          -->
+          <div class="flex-shrink-0 mr-2.5 pt-0.5">
+            <BrandLogo class="w-6 h-6" />
           </div>
           <!-- 回复的内容（Markdown 渲染） -->
           <div class="w-full max-w-[80%] mb-2">
@@ -67,6 +73,11 @@
               class="text-sm text-gray-400"
             >这次回答没有完成（生成被中断了）。</p>
             <StreamMarkdownRender :content="chat.content" />
+            <!-- 用户主动点了「停止」:正文是半截的,标一下免得以为模型就答这么多 -->
+            <p
+              v-if="chat.stopped && !chat.pending"
+              class="text-sm text-gray-400 mt-1"
+            >已停止生成。</p>
             <!-- 这一轮出错了：正文很可能只说了一半（模型先讲了两句才被拦/超时），
                  把原因亮出来 —— 不然用户看到的是半截回答，会以为它已经答完了 -->
             <p
@@ -103,12 +114,12 @@
           :busy="preparingImage"
           :send-disabled="sendState.disabled"
           :send-hint="sendState.hint"
-          :placeholder="mode === 'vision' ? '描述这张图…（留空就让模型自己描述）' : '给小哈 AI 机器人发送消息（Enter 发送，Shift + Enter 换行）'"
-          :allow-image="mode === 'vision'"
-          :show-tools="mode === 'text'"
-          :show-model="mode === 'text'"
-          :hint="mode === 'vision' ? '看图说话是「一张图 + 一个问题」的独立问答，不带聊天记忆，用后端配置的多模态模型' : ''"
+          :streaming="isSending"
+          :vision="!!attachment"
+          placeholder="给小哈 AI 机器人发送消息（Enter 发送，Shift + Enter 换行）"
+          :hint="attachment ? '看图问答：本次不带聊天记忆，回答也不写入会话历史' : ''"
           @send="sendMessage"
+          @stop="handleStop"
           @pick-image="pickImage"
           @remove-image="removeImage"
         />
@@ -133,7 +144,7 @@ import MessageActions from '@/components/MessageActions.vue'
 import BrandLogo from '@/components/BrandLogo.vue'
 import ChatInputBox from '@/components/ChatInputBox.vue'
 import ImagePreview from '@/components/ImagePreview.vue'
-import { parseChunkPayload, readSseStream } from '@/utils/sse.js'
+import { parseChunkPayload } from '@/utils/sse.js'
 import { lastRegenerableId, turnIndexOf as turnIndexOfMessage } from '@/utils/chat-turn.js'
 import { conversationApi } from '@/api/conversation.js'
 import { feedbackApi } from '@/api/chat.js'
@@ -160,15 +171,6 @@ const route = useRoute()
 const sessionStore = useSessionStore()
 const modelStore = useModelStore()
 const toolStore = useToolStore()
-
-/** 两种对话模式。kind 会记在每条消息上，用来决定走哪条后端链路 */
-const MODES = [
-  { value: 'text', label: '文字对话' },
-  { value: 'vision', label: '看图说话' },
-]
-
-/** 当前模式：text = 文字对话(有记忆) / vision = 看图说话(无状态) */
-const mode = ref('text')
 
 /**
  * 本次会话的 uuid —— 来自路由(/chat/:uuid)
@@ -421,8 +423,7 @@ const consumeHandoff = async () => {
   }
 
   if (handoff.file) {
-    // 看图说话:图片已经在首页压缩好了,直接用
-    mode.value = 'vision'
+    // 带图 → 走看图问答那条链路(图片已经在首页压缩好了,直接用)
     // 预览地址的所有权从首页转到这里 —— 首页那边已经不再回收它了
     adoptImage({ file: handoff.file, previewUrl: handoff.previewUrl })
     message.value = handoff.message
@@ -451,12 +452,32 @@ let streamController = null
 /** 看图说话那条链路的请求控制器（用来中途掐断） */
 let visionController = null
 
+/**
+ * 用户主动点了「停止生成」
+ *
+ * <p>⚠️ 要把它和「页面自己掐断的」(切会话 / 离开页面)分开:
+ *    前者是用户的正常操作,气泡里该写一句「已停止生成」;
+ *    后者是页面不要这条流了,不该在气泡里留话。
+ */
+let userStopped = false
+
 /** 掐掉正在跑的流 */
 const stopStream = () => {
   if (streamController) {
     streamController.abort()
     streamController = null
   }
+}
+
+/**
+ * 用户点了「停止生成」
+ *
+ * <p>两条链路(文字对话 / 看图说话)都要掐 —— 万一用户是在看图说话时点的呢。
+ */
+const handleStop = () => {
+  userStopped = true
+  stopStream()
+  visionController?.abort()
 }
 
 /**
@@ -475,6 +496,9 @@ const startStream = async (userMessage, replyIndex) => {
   //    所以每次用之前都要判空 —— 否则会在这儿抛 TypeError,白屏。
   const reply = () => chatList.value[replyIndex]
 
+  // 这一轮不是用户主动停的(上一次停过了,别把标记带过来)
+  userStopped = false
+
   const controller = new AbortController()
   streamController = controller
 
@@ -486,7 +510,7 @@ const startStream = async (userMessage, replyIndex) => {
     //    后端换路径/加参数只改那一处。
     //
     // ⚠️ 这里是 **POST**,不能用 EventSource(它只能发 GET)——
-    //    所以自己 fetch + ReadableStream 读 SSE(帧解析在 utils/sse.js)。
+    //    走的是 utils/sse.js 那层(基于 @microsoft/fetch-event-source)。
     //
     // ⚠️ 联网搜索:用户开着、但当前模型不支持的话,这次不联网 ——
     //    发 networkSearch=true 后端会直接 400(它不静默降级),
@@ -495,43 +519,42 @@ const startStream = async (userMessage, replyIndex) => {
     const webSearch = modelStore.webSearchStatus
     if (webSearch.reason) antMessage.info(webSearch.reason)
 
-    const res = await conversationApi.completion({
-      message: userMessage,
-      chatId: chatId.value,
-      modelName: modelStore.code,
-      networkSearch: webSearch.enabled,
-      tools: toolStore.toolsParam,
-      signal: controller.signal,
-    })
-
     // 累计的流式回答文本（只累加正文，不含思考链）
     let responseText = ''
     // 后端发来的失败原因（如「模型输出被 max_tokens 截断…」）。
     // 后端用 event:error 事件下发,这里存下来,收尾时优先展示,别被通用文案盖掉。
     let serverError = ''
 
-    await readSseStream(res, ({ event, data }) => {
-      // ⚠️ 必须解析:后端用 JSON 信封,data 是 {"v":"正文"} 而不是正文本身。
-      //    parseChunkPayload 同时认新旧两种格式,前后端谁先上线都行。
-      const payload = parseChunkPayload(data)
-      const target = reply()
-      if (!target) return
-      if (event === 'message') {
-        responseText += payload
-        target.content = responseText
-        target.pending = false
-      } else if (event === 'thinking') {
-        // 思考链:只用它维持「正在思考…」提示,不渲染进正文,避免污染最终回答。
-        // 正文已经开始输出后就不再退回「正在思考」状态
-        if (!responseText) target.pending = true
-      } else if (event === 'error') {
-        serverError = payload
-        // ⚠️ 原因要**记在气泡上**,不能只在「内容为空」时才显示 ——
-        //    模型常常先说一两句才失败(比如被内容审核拦下、或第二轮超时),
-        //    那时内容不为空,错误就整个被吞掉了:用户看到半截回答,像成功了一样,
-        //    根本不知道这一轮其实没答完。
-        if (target) target.failed = payload
-      }
+    await conversationApi.completion({
+      message: userMessage,
+      chatId: chatId.value,
+      modelName: modelStore.code,
+      networkSearch: webSearch.enabled,
+      tools: toolStore.toolsParam,
+      signal: controller.signal,
+      onFrame: ({ event, data }) => {
+        // ⚠️ 必须解析:后端用 JSON 信封,data 是 {"v":"正文"} 而不是正文本身。
+        //    parseChunkPayload 同时认新旧两种格式,前后端谁先上线都行。
+        const payload = parseChunkPayload(data)
+        const target = reply()
+        if (!target) return
+        if (event === 'message') {
+          responseText += payload
+          target.content = responseText
+          target.pending = false
+        } else if (event === 'thinking') {
+          // 思考链:只用它维持「正在思考…」提示,不渲染进正文,避免污染最终回答。
+          // 正文已经开始输出后就不再退回「正在思考」状态
+          if (!responseText) target.pending = true
+        } else if (event === 'error') {
+          serverError = payload
+          // ⚠️ 原因要**记在气泡上**,不能只在「内容为空」时才显示 ——
+          //    模型常常先说一两句才失败(比如被内容审核拦下、或第二轮超时),
+          //    那时内容不为空,错误就整个被吞掉了:用户看到半截回答,像成功了一样,
+          //    根本不知道这一轮其实没答完。
+          if (target) target.failed = payload
+        }
+      },
     })
 
     // 流正常结束却一个字都没有 → 给个能看的提示，别留个空气泡
@@ -546,8 +569,14 @@ const startStream = async (userMessage, replyIndex) => {
     const target = reply()
     if (!target) return
     if (e.name === 'AbortError') {
-      // 自己掐掉的(切会话/离开页面)—— 已经收到一半就留着
-      target.content = target.content || '已取消。'
+      if (userStopped) {
+        // 用户主动点了「停止」—— 已经答出来的一半留着,下面标一句「已停止生成」
+        // (正文一个字都没有时,那行提示就是全部内容,不让气泡空着)
+        target.stopped = true
+      } else {
+        // 页面自己掐掉的(切会话/离开页面)—— 已经收到一半就留着
+        target.content = target.content || '已取消。'
+      }
     } else {
       console.error('发送消息错误: ', e)
       const reason = e.message || '抱歉，请求出错了，请稍后重试。'
@@ -586,6 +615,8 @@ const startStream = async (userMessage, replyIndex) => {
 const runVisionRequest = async (file, question, replyIndex) => {
   // ⚠️ 可能取不到:流跑到一半用户切了会话,chatList 已经被换掉了(同 startStream)
   const reply = () => chatList.value[replyIndex]
+  // 这一轮不是用户主动停的
+  userStopped = false
   const controller = new AbortController()
   visionController = controller
   // 后端说「模型没吐出正文」时给的原因(比如思考链把 max_tokens 吃光了)
@@ -625,7 +656,12 @@ const runVisionRequest = async (file, question, replyIndex) => {
     const target = reply()
     if (!target) return
     if (e.name === 'AbortError') {
-      target.content = target.content || '已取消。'
+      if (userStopped) {
+        // 用户主动点了「停止」—— 答出来的一半留着,下面标一句「已停止生成」
+        target.stopped = true
+      } else {
+        target.content = target.content || '已取消。'
+      }
     } else {
       console.error('看图说话失败: ', e)
       const reason = e.message || '抱歉，请求出错了，请稍后重试。'
@@ -655,13 +691,14 @@ const runVisionRequest = async (file, question, replyIndex) => {
  */
 const sendState = computed(() => {
   if (isSending.value) return { disabled: true, hint: '正在发送…' }
+  // ⚠️ 历史消息还在加载时**不能发**:
+  //    加载完会把 chatList 整个换掉(chatList.value = list)——
+  //    这时候乐观推进去的「用户提问 + 占位回复」会被一起冲掉,
+  //    而模型的回答还在往那个下标写 → 用户的消息就这么没了。
+  if (loadingHistory.value) return { disabled: true, hint: '正在加载历史消息…' }
   if (preparingImage.value) return { disabled: true, hint: '正在压缩图片…' }
-  // 看图说话:有图就能发(问题可以留空,让模型自己描述)
-  if (mode.value === 'vision') {
-    return attachment.value
-      ? { disabled: false, hint: '' }
-      : { disabled: true, hint: '先选一张图' }
-  }
+  // ⚠️ 带图了 → 走看图问答:问题可以留空(让模型自己描述这张图)
+  if (attachment.value) return { disabled: false, hint: '' }
   if (!message.value.trim()) return { disabled: true, hint: '说点什么再发' }
   return { disabled: false, hint: '' }
 })
@@ -669,7 +706,12 @@ const sendState = computed(() => {
 // 发送消息
 const sendMessage = async () => {
   if (isSending.value || preparingImage.value) return
-  if (mode.value === 'vision') return sendVisionMessage()
+  // ⚠️ 历史还没加载完就别发 —— 会被加载完的「整体替换」冲掉(见 sendState)
+  if (loadingHistory.value) return
+  // 一个输入框,带没带图决定走哪条链路:
+  //   带图 → /v9/ai/generateStream(多模态,无状态)
+  //   没图 → /chat/completion(带聊天记忆)
+  if (attachment.value) return sendVisionMessage()
   return sendTextMessage()
 }
 
@@ -681,6 +723,9 @@ const sendMessage = async () => {
 const sendTextMessage = async () => {
   const userMessage = message.value.trim()
   if (!userMessage) return false
+  // ⚠️ 同上:历史没加载完不能发
+  //    (首页交接过来的那条消息是在历史加载完之后才发的,不受影响)
+  if (loadingHistory.value) return false
 
   // 标记为发送中（按钮置灰、避免重复发送）
   isSending.value = true
@@ -713,6 +758,8 @@ const sendTextMessage = async () => {
 const sendVisionMessage = async () => {
   const att = attachment.value
   if (!att) return
+  // ⚠️ 历史没加载完不能发(会被加载完的「整体替换」冲掉,见 sendState)
+  if (loadingHistory.value) return
 
   // 什么都没写就让模型自己描述（后端也有一份默认值，这里自己给更可控）
   const question = message.value.trim() || DEFAULT_QUESTION
@@ -819,6 +866,7 @@ const regenerateText = async (idx) => {
     target.pending = true
     target.done = false
     target.interrupted = false
+    target.stopped = false // ⚠️ 上一轮的「已停止」标记也要清掉
     target.failed = '' // ⚠️ 上一轮的失败标记要清掉,不然重试时那个错误还挂在下面
     scrollToBottom(true)
 
@@ -846,6 +894,7 @@ const regenerateVision = async (idx) => {
   target.content = ''
   target.pending = true
   target.done = false
+  target.stopped = false // ⚠️ 上一轮的「已停止」标记也要清掉
   target.failed = '' // ⚠️ 上一轮的失败标记要清掉,不然重试时那个错误还挂在下面
   scrollToBottom(true)
 
@@ -940,18 +989,6 @@ const urlParam = (name) => {
 
 const visionModel = urlParam('visionModel')
 
-/**
- * 切换对话模式
- *
- * 切走的时候把待发送的图片丢掉 —— 文字模式下留着它没有意义,
- * 下次切回来发现「怎么还挂着一张图」会让人困惑。
- */
-const switchMode = (next) => {
-  if (mode.value === next) return
-  mode.value = next
-  if (next !== 'vision') removeImage()
-}
-
 /** 看图说话那条链路的请求控制器（用来中途掐断） */
 // （声明在上面「发送」那一节,这里不再重复）
 
@@ -1005,25 +1042,6 @@ watch(
   border-radius: 14px;
   max-width: calc(100% - 48px);
   position: relative;
-}
-
-/* ---------- 模式切换 ---------- */
-.mode-tab {
-  padding: 5px 14px;
-  border-radius: 9999px;
-  font-size: 12px;
-  line-height: 18px;
-  color: #6b7280;
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  transition: color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease;
-}
-
-.mode-tab.is-active {
-  color: #262626;
-  background: #fff;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
 }
 
 /* ---------- 看图说话 ---------- */

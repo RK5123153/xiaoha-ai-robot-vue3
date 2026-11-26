@@ -11,7 +11,8 @@
     <button
       type="button"
       class="chip"
-      :class="{ 'is-on': on, 'is-warn': on && unsupported }"
+      :class="{ 'is-on': on && !disabled, 'is-warn': on && unsupported && !disabled, 'is-off': disabled }"
+      :aria-disabled="disabled"
       @click="toggle"
     >
       <GlobalOutlined class="text-[13px]" />
@@ -32,6 +33,19 @@ import { useModelStore } from '@/stores/model.js'
 const modelStore = useModelStore()
 const { webSearch } = storeToRefs(modelStore)
 
+const props = defineProps({
+  /**
+   * 置灰(这次开不了联网搜索)
+   *
+   * <p>看图问答走的是多模态接口(/v9),后端不接 networkSearch ——
+   *    摆成能点的样子就是「点了没反应」的假开关。
+   */
+  disabled: {
+    type: Boolean,
+    default: false,
+  },
+})
+
 /** 开着没有 */
 const on = computed(() => webSearch.value)
 
@@ -47,6 +61,7 @@ const unsupported = computed(() => {
 
 /** 悬停提示 */
 const tip = computed(() => {
+  if (props.disabled) return '看图问答走多模态接口,本次不联网'
   if (on.value && unsupported.value) return '这个模型不支持联网搜索,本次不会联网(换个模型就恢复)'
   if (unsupported.value) return '这个模型不支持联网搜索'
   return '让模型联网查最新资料'
@@ -54,6 +69,7 @@ const tip = computed(() => {
 
 /** 开 / 关 —— 只改用户自己的偏好,跟选了哪个模型无关 */
 const toggle = () => {
+  if (props.disabled) return
   modelStore.toggleWebSearch()
 }
 </script>

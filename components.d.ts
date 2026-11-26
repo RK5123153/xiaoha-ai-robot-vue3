@@ -11,10 +11,14 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    ACheckbox: typeof import('ant-design-vue/es')['Checkbox']
     AConfigProvider: typeof import('ant-design-vue/es')['ConfigProvider']
     ADropdown: typeof import('ant-design-vue/es')['Dropdown']
+    AInput: typeof import('ant-design-vue/es')['Input']
     AMenu: typeof import('ant-design-vue/es')['Menu']
     AMenuItem: typeof import('ant-design-vue/es')['MenuItem']
+    AModal: typeof import('ant-design-vue/es')['Modal']
+    APopover: typeof import('ant-design-vue/es')['Popover']
     ArrowUpOutlined: typeof import('@ant-design/icons-vue')['ArrowUpOutlined']
     ATooltip: typeof import('ant-design-vue/es')['Tooltip']
     BrandLogo: typeof import('./src/components/BrandLogo.vue')['default']
@@ -22,6 +26,7 @@ declare module 'vue' {
     ChatListItem: typeof import('./src/components/ChatListItem.vue')['default']
     CheckOutlined: typeof import('@ant-design/icons-vue')['CheckOutlined']
     CloseOutlined: typeof import('@ant-design/icons-vue')['CloseOutlined']
+    ConversationSearch: typeof import('./src/components/ConversationSearch.vue')['default']
     CopyOutlined: typeof import('@ant-design/icons-vue')['CopyOutlined']
     DeleteOutlined: typeof import('@ant-design/icons-vue')['DeleteOutlined']
     DisclaimerBar: typeof import('./src/components/DisclaimerBar.vue')['default']
@@ -46,10 +51,13 @@ declare module 'vue' {
     ReloadOutlined: typeof import('@ant-design/icons-vue')['ReloadOutlined']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
+    SearchOutlined: typeof import('@ant-design/icons-vue')['SearchOutlined']
+    ShareAltOutlined: typeof import('@ant-design/icons-vue')['ShareAltOutlined']
     Sidebar: typeof import('./src/components/Sidebar.vue')['default']
     SoundOutlined: typeof import('@ant-design/icons-vue')['SoundOutlined']
     StreamMarkdownRender: typeof import('./src/components/StreamMarkdownRender.vue')['default']
-    ToolBar: typeof import('./src/components/ToolBar.vue')['default']
+    ToolOutlined: typeof import('@ant-design/icons-vue')['ToolOutlined']
+    ToolPicker: typeof import('./src/components/ToolPicker.vue')['default']
     WebSearchToggle: typeof import('./src/components/WebSearchToggle.vue')['default']
   }
 }

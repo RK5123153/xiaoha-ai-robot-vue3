@@ -11,9 +11,13 @@
 
     <p>它不管「发出去之后怎么办」—— 那是页面的事:
        它只负责把「用户按了发送」「用户选了一张图」这两件事通知给页面。
+
+    <p>⚠️ **一个输入框,不分「文字对话 / 看图说话」**:
+       带没带图是页面那边根据附件判断的(见 ChatPage.vue 的 sendMessage),
+       这里只管把附件显示出来。
   -->
   <div
-    class="bg-gray-100 rounded-3xl px-4 py-3 flex flex-col border border-gray-200 transition-colors"
+    class="input-box"
     :class="{ 'is-dropping': isDragOver }"
     @dragenter.prevent="onDragEnter"
     @dragover.prevent
@@ -31,16 +35,13 @@
       />
     </div>
 
-    <!-- 工具开关:勾上的工具才会发给模型。首页和聊天页共用同一份勾选(存在 store 里) -->
-    <ToolBar v-if="showTools" />
-
-    <!-- 模式提示(比如「看图说话不带聊天记忆」) -->
+    <!-- 模式提示(比如「看图问答不带聊天记忆」) -->
     <p v-if="hint" class="hint">{{ hint }}</p>
 
     <textarea
       v-model="innerValue"
       :placeholder="placeholder"
-      class="bg-transparent border-none outline-none w-full text-sm resize-none min-h-[24px]"
+      class="input-textarea"
       rows="2"
       @input="autoResize"
       @keydown="handleKeydown"
@@ -50,7 +51,8 @@
     ></textarea>
 
     <!--
-      底部一排:左边是「模型选择 / 联网搜索」,右边是「图片 / 发送」。
+      底部一行(参考 DeepSeek 的布局):
+      左边是「能力开关」(工具 / 模型 / 联网搜索),右边是「图片 / 发送」。
 
       ⚠️ flex-wrap + ml-auto:
          窄屏上左边的圆片换行时,右边的发送按钮要跟着换行还保持靠右 ——
@@ -58,41 +60,49 @@
          空 div 在换行后会占掉一整行,把按钮挤到下一行去。
     -->
     <div class="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1.5">
-      <div class="flex items-center gap-2 flex-wrap min-w-0">
-        <!--
-          ⚠️ 模型选择和联网搜索只在**文字对话**里有意义:
-             看图说话那条链路(/v9)后端不接模型、也不接联网搜索参数,
-             摆在这儿就是个「点了没反应」的假开关 —— 用户选了以为生效了,其实没有。
-             所以那条模式下整个藏起来。
-        -->
-        <template v-if="showModel">
-          <ModelPicker />
-          <WebSearchToggle />
-        </template>
-      </div>
+      <!--
+        ⚠️ 带图时(看图问答)这三个开关**这次不生效** ——
+        多模态那条路(/v9)后端不接模型、也不接联网搜索和工具。
+        摆成正常的样子就是「点了没反应」的假开关,所以直接置灰,
+        鼠标悬停说明为什么。
+      -->
+      <a-tooltip
+        :title="vision ? '看图问答走的是多模态接口,模型 / 联网搜索 / 工具这次都不生效' : ''"
+        placement="top"
+      >
+        <div class="flex items-center gap-2 flex-wrap min-w-0">
+          <ToolPicker :disabled="vision" />
+          <ModelPicker :disabled="vision" />
+          <WebSearchToggle :disabled="vision" />
+        </div>
+      </a-tooltip>
 
       <div class="flex items-center gap-2 ml-auto">
-        <ImagePicker v-if="allowImage" :disabled="busy" @pick="onPickImage" />
+        <ImagePicker :disabled="busy" @pick="onPickImage" />
         <!--
           ⚠️ 发送按钮用 aria-disabled 而不是 disabled:
           disabled 的按钮在浏览器里**不派发鼠标事件**,antd 的 Tooltip 靠的就是这些事件
           → 灰着的按钮反而**弹不出**「为什么还不能发」的说明,而这恰恰是最需要说明的时候。
-          (和 ToolBar 里那排工具开关一个道理。)
 
           ⚠️ 别再给这个按钮加原生 title —— title 和 a-tooltip 会**弹两次**。
+
+          ⚠️ streaming(正在流式输出)时这个按钮**变成「停止」**:
+             模型卡住、答得太慢、或者用户突然不想听了,总得给个能按的东西 ——
+             一个灰着的死按钮等于没给。
+             (AbortController 一直都在,见 ChatPage.vue 的 stopStream,
+              只是以前没有任何入口能碰到它。)
         -->
-        <a-tooltip :title="sendTooltip" placement="top">
+        <a-tooltip :title="streaming ? '停止生成' : sendTooltip" placement="top">
           <button
             type="button"
-            @click="onSend"
-            :aria-disabled="sendDisabled"
-            aria-label="发送消息"
-            class="flex items-center justify-center bg-[#4d6bfe] text-white rounded-full w-8 h-8
-                   border border-[#4d6bfe] hover:bg-[#3b5bef] transition-colors
-                   aria-disabled:opacity-50 aria-disabled:cursor-not-allowed
-                   aria-disabled:hover:bg-[#4d6bfe]"
+            @click="streaming ? onStop() : onSend()"
+            :aria-disabled="!streaming && sendDisabled"
+            :aria-label="streaming ? '停止生成' : '发送消息'"
+            class="send-btn"
           >
-            <ArrowUpOutlined class="text-xl" />
+            <!-- 停止:一个实心小方块 -->
+            <span v-if="streaming" class="block w-2.5 h-2.5 rounded-[2px] bg-white"></span>
+            <ArrowUpOutlined v-else class="text-xl" />
           </button>
         </a-tooltip>
       </div>
@@ -111,7 +121,7 @@ import ImagePicker from '@/components/ImagePicker.vue'
 import ImagePreview from '@/components/ImagePreview.vue'
 import ModelPicker from '@/components/ModelPicker.vue'
 import WebSearchToggle from '@/components/WebSearchToggle.vue'
-import ToolBar from '@/components/ToolBar.vue'
+import ToolPicker from '@/components/ToolPicker.vue'
 import { isImageFile } from '@/utils/image.js'
 
 const props = defineProps({
@@ -138,7 +148,7 @@ const props = defineProps({
   /**
    * 发送按钮置灰的原因(鼠标悬停时显示)
    *
-   * <p>比如看图说话模式下是「先选一张图」——
+   * <p>比如没有图片时是「先选一张图」——
    *    光看一个灰按钮,用户不知道还差什么。
    */
   sendHint: {
@@ -150,34 +160,34 @@ const props = defineProps({
     type: String,
     default: '给小哈 AI 机器人发送消息（Enter 发送，Shift + Enter 换行）',
   },
-  /** 能不能带图:图片按钮 + 拖拽 + 粘贴,三个一起开关 */
-  allowImage: {
-    type: Boolean,
-    default: false,
-  },
-  /** 要不要显示工具开关 */
-  showTools: {
-    type: Boolean,
-    default: true,
-  },
   /**
-   * 要不要显示「模型选择 + 联网搜索」
+   * 输入框上方的一行小字提示
    *
-   * <p>看图说话那条链路不接这两个参数(后端那边是多模态专用接口),
-   *    摆出来就是个假开关 —— 所以那条模式下传 false 藏起来。
+   * <p>比如「看图问答不带聊天记忆」——
+   *    有些限制光靠置灰说不清楚,得有一行字讲明白。
    */
-  showModel: {
-    type: Boolean,
-    default: true,
-  },
-  /** 输入框上方的一行小字提示 */
   hint: {
     type: String,
     default: '',
   },
+  /**
+   * 正在走「看图问答」那条链路(带了图)
+   *
+   * <p>那条路(/v9/ai)后端不接模型、也不接联网搜索和工具 ——
+   *    所以那几个开关要置灰,不能让用户以为这次生效了。
+   */
+  vision: {
+    type: Boolean,
+    default: false,
+  },
+  /** 正在流式输出(发送按钮变成「停止」) */
+  streaming: {
+    type: Boolean,
+    default: false,
+  },
 })
 
-const emit = defineEmits(['update:modelValue', 'send', 'pick-image', 'remove-image'])
+const emit = defineEmits(['update:modelValue', 'send', 'stop', 'pick-image', 'remove-image'])
 
 /** 拖拽悬停在输入框上(高亮提示「可以放这儿」) */
 const isDragOver = ref(false)
@@ -252,7 +262,7 @@ const handleCompositionEnd = () => {
  *     1. e.isComposing  —— 标准属性,组字期间为 true
  *     2. e.keyCode === 229 —— 老浏览器的组字标记
  *     3. isComposing.value —— 我们自己在 compositionstart/end 里维护的状态
- *   另外部分浏览器在 compositionend 之后还会补发一个 Enter 的 keydown,
+ *   另外部分浏览器在 compositionend 之后还会补发一个 keydown,
  *   用时间戳把这一小段时间内的 Enter 吞掉(人手动再按一次至少隔 150ms,误伤不到)。
  */
 const handleKeydown = (e) => {
@@ -289,6 +299,16 @@ const onSend = () => {
   emit('send')
 }
 
+/**
+ * 点「停止生成」
+ *
+ * <p>只是把「我要停了」这件事告诉页面 —— 真正掐断请求的是页面那边
+ *    (AbortController 在那儿,组件里没有)。
+ */
+const onStop = () => {
+  emit('stop')
+}
+
 /* ──────────────────────────────────────────────────────────────────────
  * 图片:拖进来 / 粘贴进来
  * ────────────────────────────────────────────────────────────────────── */
@@ -297,13 +317,11 @@ const onSend = () => {
 let dragDepth = 0
 
 const onDragEnter = () => {
-  if (!props.allowImage) return
   dragDepth++
   isDragOver.value = true
 }
 
 const onDragLeave = () => {
-  if (!props.allowImage) return
   dragDepth = Math.max(0, dragDepth - 1)
   if (dragDepth === 0) isDragOver.value = false
 }
@@ -318,7 +336,6 @@ const onDragLeave = () => {
 const onDrop = (e) => {
   dragDepth = 0
   isDragOver.value = false
-  if (!props.allowImage) return
   const files = e.dataTransfer?.files || []
   for (const f of files) {
     if (isImageFile(f)) {
@@ -336,7 +353,6 @@ const onDrop = (e) => {
  *    把文字也挡掉的话用户会觉得「粘贴失灵了」。
  */
 const onPaste = (e) => {
-  if (!props.allowImage) return
   const items = e.clipboardData?.items
   if (!items) return
   for (const item of items) {
@@ -365,17 +381,78 @@ onMounted(() => {
 </script>
 
 <style scoped>
+/*
+  输入框本体:白底 + 描边 + 大圆角(参考 DeepSeek 的样子)。
+
+  ⚠️ 原来是灰底(rounded-3xl 的灰盒子),现在改成白底描边 ——
+     页面本身是白底,输入框得靠描边才「浮」出来。
+*/
+.input-box {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 16px;
+  padding: 10px 14px 12px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+/* 聚焦时描边深一点、给一点点阴影 —— 让用户知道「现在能打字了」 */
+.input-box:focus-within {
+  border-color: #d1d5db;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.04);
+}
+
 /* 拖拽悬停:告诉用户「可以放这儿」 */
-.is-dropping {
+.input-box.is-dropping {
   background: #eff6ff;
   border-color: #4d6bfe;
 }
 
-/* 输入框上方的一行小字提示 */
+/* 输入框上方的一行小字提示(比如「看图问答不带聊天记忆」) */
 .hint {
   margin-bottom: 6px;
   font-size: 11px;
   line-height: 16px;
   color: #9ca3af;
+}
+
+/* 文本域:透明底、无边框,高度由脚本管 */
+.input-textarea {
+  background: transparent;
+  border: none;
+  outline: none;
+  width: 100%;
+  font-size: 14px;
+  line-height: 22px;
+  resize: none;
+  min-height: 24px;
+  color: #262626;
+}
+
+/* 发送按钮:品牌蓝圆钮 */
+.send-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 9999px;
+  background: #4d6bfe;
+  color: #fff;
+  border: 1px solid #4d6bfe;
+  cursor: pointer;
+  transition: background-color 0.15s ease, opacity 0.15s ease;
+}
+
+.send-btn:hover {
+  background: #3b5bef;
+}
+
+.send-btn[aria-disabled='true'] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.send-btn[aria-disabled='true']:hover {
+  background: #4d6bfe;
 }
 </style>

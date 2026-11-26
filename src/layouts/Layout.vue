@@ -9,83 +9,157 @@
       @click="drawerOpen = false"
     ></div>
 
-    <!-- 左边栏 -->
-    <Sidebar :collapsed="collapsed" :drawer-open="drawerOpen" @close="drawerOpen = false" />
-
-    <!--
-      侧边栏「收缩 / 展开」按钮(仅桌面端)
-      ⚠️ 移动端不显示:那边侧边栏本来就是抽屉,由顶栏的汉堡按钮管,
-         再挂一个浮动按钮会挡住内容、还多出一个同功能的入口。
-    -->
-    <!--
-      悬停提示用 antd 的 <a-tooltip>,不用原生 title:
-      原生 title 要悬停 1 秒才弹,样式还是浏览器自带的灰方块。
-      ⚠️ 别再给这个按钮加原生 title —— title 和 a-tooltip 会**弹两次**。
-      统一到 antd 而不是各写各的 CSS:以后再引入 Dropdown / Modal,
-      弹层避让、延迟、读屏这些细节都是现成的,不必每处自己写一遍。
-    -->
-    <a-tooltip placement="bottom">
-      <template #title>
-        <span>{{ collapsed ? '展开侧边栏' : '收起侧边栏' }}</span>
-      </template>
-      <button
-        type="button"
-        class="hidden md:flex items-center justify-center fixed top-4 z-30
-               bg-white border border-gray-200 p-2
-               transition-[left] duration-300 ease-in-out"
-        :class="collapsed ? 'left-0 rounded-lg' : 'left-64 rounded-r-lg'"
-        :aria-label="collapsed ? '展开侧边栏' : '收起侧边栏'"
-        :aria-expanded="!collapsed"
-        @click="toggleCollapsed"
-      >
-        <!-- 收起 / 展开:antd 里对应 MenuFold / MenuUnfold -->
-        <MenuFoldOutlined v-if="collapsed" class="text-xl text-gray-400" />
-        <MenuUnfoldOutlined v-else class="text-xl text-gray-400" />
-        <!--
-          ⚠️ 两个图标的 viewBox 里留白不一样:
-          sidebar-close 的图形在 1024 的画布里缩了一圈,同样 w-6 h-6 渲染出来
-          看着比 sidebar-open 小一圈(实测 21.5px vs 24px)。
-          所以收起时给大一号(w-7),两个状态看着才一样大。
-        -->
-      </button>
-    </a-tooltip>
+    <!-- 左边栏(收起时整个消失,它顶上的 logo 和图标挪到主内容区的顶栏里) -->
+    <Sidebar
+      :collapsed="collapsed"
+      :drawer-open="drawerOpen"
+      @close="drawerOpen = false"
+      @toggle="toggleCollapsed"
+      @search="openSearch"
+    />
 
     <!-- ─────────────── 主内容区 ─────────────── -->
     <main class="flex-1 min-w-0 flex flex-col">
-      <!-- 移动端顶栏(桌面端隐藏,那边侧边栏常驻) -->
-      <div class="md:hidden h-12 shrink-0 flex items-center gap-2 px-3 border-b border-gray-100">
+      <!--
+        顶栏。
+
+        ⚠️ 为什么顶栏在 Layout 而不在聊天页:
+           侧边栏收起时,logo 和几个图标要**挪到顶栏里**(参考 DeepSeek)——
+           顶栏是所有页面共用的,放这儿才接得住。聊天页的标题/分享也一并搬上来了。
+
+        收起时(桌面端):[logo][展开][搜索][新对话] [标题] …… [分享]
+        展开时:                          [标题] …… [分享]
+        移动端:  [汉堡][标题] …… [分享]
+      -->
+      <header class="app-header shrink-0 flex items-center gap-1.5 h-12 px-3">
+        <!-- 移动端:汉堡按钮(那边侧边栏是抽屉) -->
         <button
           type="button"
-          class="p-1.5 -ml-1.5 rounded-md text-gray-500 hover:bg-gray-100"
+          class="md:hidden p-1.5 -ml-1 rounded-md text-gray-500 hover:bg-gray-100"
           aria-label="打开侧边栏"
           @click="drawerOpen = true"
         >
           <MenuOutlined class="text-xl" />
         </button>
-        <span class="text-sm font-medium text-gray-700">小哈 AI</span>
-      </div>
+
+        <!--
+          收起时(桌面端)才出现的这一组:
+          logo + 展开 + 搜索 + 新对话 —— 它们本来在侧边栏顶上,收起后挪到这儿。
+        -->
+        <template v-if="collapsed">
+          <button
+            type="button"
+            class="hidden md:inline-flex p-1 rounded-lg hover:bg-gray-100 transition-colors"
+            aria-label="回到首页"
+            @click="goHome"
+          >
+            <BrandLogo class="w-6 h-6" />
+          </button>
+          <a-tooltip title="展开侧边栏" placement="bottom">
+            <button
+              type="button"
+              class="hidden md:inline-flex p-1.5 rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-700 transition-colors"
+              aria-label="展开侧边栏"
+              @click="toggleCollapsed"
+            >
+              <MenuUnfoldOutlined class="text-lg" />
+            </button>
+          </a-tooltip>
+          <a-tooltip title="搜索对话" placement="bottom">
+            <button
+              type="button"
+              class="hidden md:inline-flex p-1.5 rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-700 transition-colors"
+              aria-label="搜索对话"
+              @click="openSearch"
+            >
+              <SearchOutlined class="text-lg" />
+            </button>
+          </a-tooltip>
+          <a-tooltip title="开启新对话" placement="bottom">
+            <button
+              type="button"
+              class="hidden md:inline-flex p-1.5 rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-700 transition-colors"
+              aria-label="开启新对话"
+              @click="goHome"
+            >
+              <PlusOutlined class="text-lg" />
+            </button>
+          </a-tooltip>
+        </template>
+
+        <!-- 会话标题(首页没有会话,就不显示) -->
+        <h1 v-if="chatTitle" class="ml-2 truncate text-[15px] font-medium text-gray-800">
+          {{ chatTitle }}
+        </h1>
+
+        <!-- 分享:复制当前会话的链接 -->
+        <a-tooltip v-if="chatId" title="复制会话链接" placement="bottom">
+          <button
+            type="button"
+            class="ml-auto shrink-0 p-1.5 rounded-md text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
+            aria-label="复制会话链接"
+            @click="shareChat"
+          >
+            <ShareAltOutlined class="text-lg" />
+          </button>
+        </a-tooltip>
+      </header>
 
       <!-- 真正的页面(首页 / 聊天页) -->
       <RouterView />
     </main>
+
+    <!-- 搜索对话的弹层 -->
+    <ConversationSearch :open="searchOpen" @close="searchOpen = false" />
   </div>
 </template>
 
 <script setup>
-import { ref, watch, onMounted } from 'vue'
-import { useRoute } from 'vue-router'
+import { ref, computed, watch, onMounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+// 这里起别名:页面里已经有叫 message 的变量(输入框的草稿)
+import { message as antMessage } from 'ant-design-vue'
 import Sidebar from '@/components/Sidebar.vue'
+import BrandLogo from '@/components/BrandLogo.vue'
+import ConversationSearch from '@/components/ConversationSearch.vue'
 import { useSessionStore } from '@/stores/sessions.js'
 import { useModelStore } from '@/stores/model.js'
 import { useToolStore } from '@/stores/tools.js'
 import { safeGetItem, safeSetItem } from '@/utils/storage.js'
+import { copyText } from '@/utils/clipboard.js'
 
 const route = useRoute()
+const router = useRouter()
 
 /** 三个 store:会话列表 / 模型选择 / 工具开关(全局共享,首页和聊天页是同一份) */
 const sessionStore = useSessionStore()
 const modelStore = useModelStore()
 const toolStore = useToolStore()
+
+/** 搜索对话的弹层开着没 */
+const searchOpen = ref(false)
+
+const openSearch = () => {
+  searchOpen.value = true
+}
+
+/** 当前打开的会话(uuid)—— 首页没有 */
+const chatId = computed(() => route.params?.uuid || '')
+
+/** 顶栏上的会话标题 */
+const chatTitle = computed(() => sessionStore.titleOf(chatId.value) || '')
+
+/** 回首页(新对话) */
+const goHome = () => {
+  router.push({ name: 'home' })
+}
+
+/** 分享:把当前会话的链接复制到剪贴板 */
+const shareChat = async () => {
+  const ok = await copyText(location.href)
+  if (ok) antMessage.success('链接已复制')
+  else antMessage.info('复制失败，请手动复制地址栏')
+}
 
 /**
  * 桌面端:侧边栏是不是收起来了

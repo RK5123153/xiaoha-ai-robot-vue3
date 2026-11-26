@@ -1,119 +1,48 @@
 /**
- * SSE 分片负载解析
+ * SSE 传输层 —— 基于微软的 `@microsoft/fetch-event-source`
  *
- * ── 为什么要包一层 JSON ─────────────────────────────────────────────
+ * ── 为什么用库,而不是自己拆帧 ────────────────────────────────────────
  *
- * SSE 规范里有一条容易踩的规则：data 字段的值如果以一个空格开头，
- * 这个空格会被**浏览器**剥掉。
+ * 教程里推荐这个库,推荐得对:
+ *   · SSE 的帧格式是**规范**(event/data/id/retry 字段、多行 data、注释行、
+ *     「冒号后只剥一个空格」……),自己实现一遍是把自己绑在规范细节上;
+ *   · 库是微软维护的,规范变了他们跟着改;
+ *   · 解析是字节级扫描(subarray,不拷贝),比「字符串缓冲区 + 拼字符串」省分配。
  *
- * Spring 的 SseEmitter 写出来的是「data:」+ 原文（冒号后面没有空格），
- * 于是原文的第一个空格就成了那个「会被剥掉的空格」：
+ * ⚠️ 但**不能直接用** —— 这个库有两条默认行为对 POST 是灾难性的:
  *
- *   模型原文      "### 标题"
- *   Spring 写出   data:### 标题
- *   浏览器收到    "### 标题"   ← 空格没了
+ *   1. `openWhenHidden` 默认 false:它监听 visibilitychange,
+ *      标签页一被藏起来就 abort,切回来时**重新 POST 一次**。
+ *      GET 叫「断线重连」,POST 叫「同一条提问被后端收了两遍」。
+ *   2. `onerror` 默认不抛异常时会**无限重连** —— 每重连一次就是重发一次。
  *
- * 后果就是教程里那个现象：`### 标题` 被拆成 `###` / ` 标题` 两个分片时，
- * 第二个分片开头的空格被吃掉，拼回来变成 `###标题`，
- * 而 CommonMark 要求 ATX 标题的 `#` 后面必须有空格，
- * 于是标题降级成普通段落 —— 这就是「偶尔部分格式转换不正确」。
+ * 所以这个文件是**一层壳**:把库的旋钮拧到适合 POST 的位置,
+ * 再补上这个项目要的三样东西(空闲超时 / 后端错误原因 / 取消的语义),
+ * 页面和接口层**只跟这一层打交道**,永远不直接调 fetchEventSource。
  *
- * 后端现在的做法是「前置一个空格」(.data(" " + chunk))，
- * 让那个被剥掉的空格变成我们自己补的那个，模型的空格就保住了。
- * **单行分片确实修好了**，但多行分片修不好：
- * Spring 会把多行内容拆成多个 data 行，而浏览器是**逐行**剥空格的，
- * 于是只有第一行被补偿，续行照样少一个空格：
+ * ── 这一层加的三样东西(库里没有)────────────────────────────────────
  *
- *   模型原文      "第一行\n    return x"
- *   Spring 写出   data: 第一行
- *                 data:    return x
- *   浏览器收到    "第一行\n   return x"   ← 缩进少了一个空格
+ *   1. **空闲超时**:后端**不发心跳**(思考阶段一个字节都不发),
+ *      连接真死了和「模型在想」从外面看一模一样 → 3 分钟没等到完整帧就掐断。
+ *   2. **后端的失败原因**:库默认的 onopen 只看 content-type,
+ *      后端那句「provider 'bailian' 没有配置 API key」会被吃掉;
+ *      这里把 JSON 错误体里的 message 挖出来原样抛出去。
+ *   3. **取消的语义**:库收到 abort 是**正常 resolve**(不算错),
+ *      上层分不出「用户主动停了」和「流正常结束」→ 这里把它还原成 AbortError。
  *
- * 代码块里的缩进被吃掉一个空格，嵌套列表也会被拆散 ——
- * 而且前端**修不了**：空格已经没了，前端无从得知原来有几个。
+ * ── 为什么还留着「JSON 信封」那套 ───────────────────────────────────
  *
- * 把内容包进 JSON 就彻底绕开了这个坑：
- *   - data 值以 `{` 开头，没有空格可剥
- *   - JSON 会把换行转义成 \n，一个分片永远只占一行，不会被拆成多个 data 行
- *   - 缩进、空白全部原样保留
- *
- * ── 为什么这里要兼容两种格式 ───────────────────────────────────────
- *
- * 后端改成 JSON 信封、前端改成解析 JSON，这两件事是分开上线的。
- * 如果前端只认 JSON，后端还没更新时整条回复会变成乱码；
- * 如果后端只发 JSON、前端还没更新，用户会看到满屏 {"v":"..."}。
- *
- * 所以这里两种都认：新格式走 JSON.parse，旧格式原样返回。
- * 无论先改前端还是先改后端，页面都是正常的。
+ * SSE 规范里 data 的值如果以一个空格开头,这个空格会被**浏览器**剥掉。
+ * 后端改成「前置一个空格」只能救**单行**分片,多行分片续行照样少一个空格 ——
+ * 缩进被吃掉,代码块就散了,而且前端修不了(空格已经没了)。
+ * 把内容包进 JSON 就彻底绕开:data 值以 `{` 开头,没有空格可剥,
+ * 而且 JSON 会把换行转义成 \n,一个分片永远只占一行。
+ * → 后端用 JSON 信封,前端用 {@link parseChunkPayload} 拆信封(两种格式都认,
+ *   前后端谁先上线都行)。
  */
 
-/**
- * 信封的识别：必须是 {"v": 开头
- *
- * 为什么不直接 JSON.parse 所有分片？
- *   1. 快路径 —— 绝大多数分片不是 JSON，省一次 try/catch
- *   2. 旧格式的模型正文里可能**本身就是**一段 JSON（比如用户问「给我一段 JSON」），
- *      那种情况下必须原样显示，不能被当成信封拆开
- */
-const ENVELOPE_HEAD = /^\{\s*"v"\s*:/
-
-/* ──────────────────────────────────────────────────────────────────────
- * 原始字节流 → SSE 帧
- *
- * 为什么要自己解析:
- *   浏览器的 `EventSource` **只能发 GET** —— 传文件(multipart)必须用 fetch,
- *   而 fetch 拿到的是原始字节流,SSE 的帧结构得自己拆。
- *   /v9/ai 的「上传图片 + 流式回答」走的就是这条路。
- * ────────────────────────────────────────────────────────────────────── */
-
-/**
- * 把一段 SSE 原始文本拆成事件帧
- *
- * 一个事件长这样(Spring 的 SseEmitter 写出来的形式,冒号后**没有**空格):
- *
- *   event:message
- *   data:{"v":"分片原文"}
- *   <空行>
- *
- * @param {string} text 一段完整的 SSE 文本(以空行结尾)
- * @returns {Array<{event: string, data: string}>}
- */
-export const parseSseFrames = (text) => {
-  const frames = []
-  if (!text) return frames
-
-  // 一个事件以「空行」结束。Spring 写的是 \n\n,标准允许 \r\n\r\n
-  for (const block of text.split(/\r?\n\r?\n/)) {
-    if (!block.trim()) continue
-
-    let event = 'message'
-    const dataLines = []
-
-    for (const line of block.split(/\r?\n/)) {
-      // 空行、注释行(以冒号开头,后端用它发心跳)
-      if (!line || line.startsWith(':')) continue
-
-      const colon = line.indexOf(':')
-      const field = colon === -1 ? line : line.slice(0, colon)
-      let value = colon === -1 ? '' : line.slice(colon + 1)
-
-      // SSE 规范:冒号后**一个**前导空格要去掉。
-      // ⚠️ Spring 写的是 "data:" + 原文(冒号后没有空格),所以这里去掉的那个空格
-      //    只可能是协议允许的那一个,不会误伤正文 ——
-      //    真正会被吃掉的那个空格早就在浏览器/传输层那一环丢掉了,
-      //    后端改用 JSON 信封就是为了绕开它(见本文件开头的说明)。
-      if (value.startsWith(' ')) value = value.slice(1)
-
-      if (field === 'event') event = value
-      else if (field === 'data') dataLines.push(value)
-    }
-
-    // 没有 data 的帧(比如只有 event 名的)没有内容可读,丢掉
-    if (dataLines.length) frames.push({ event, data: dataLines.join('\n') })
-  }
-
-  return frames
-}
+import { fetchEventSource } from '@microsoft/fetch-event-source'
+import { combineSignals, readErrorMessage } from '@/api/base.js'
 
 /**
  * 空闲多久算「流断了」(ms)
@@ -127,104 +56,197 @@ export const parseSseFrames = (text) => {
 const DEFAULT_IDLE_TIMEOUT = 180000
 
 /**
- * 读一个分片,带空闲超时
+ * 发一个 SSE 请求,逐帧回调
  *
- * <p>⚠️ 用 Promise.race 而不是 AbortSignal:超时是「读这一片读太久」,
- *    不是「取消整个请求」—— 连接本身可能还有救(比如下一个分片就来了)。
- *
- * @param {ReadableStreamDefaultReader} reader
- * @param {number} ms 空闲超时;0 = 不限
+ * @param {object} params
+ * @param {string} params.url 要请求的地址
+ * @param {string} [params.method] 默认 POST(这个项目两条链路都是 POST)
+ * @param {object} [params.headers] 请求头
+ * @param {string|FormData} [params.body] 请求体
+ * @param {AbortSignal} [params.signal] 调用方的取消信号(用户切会话/点停止)
+ * @param {(frame: {event: string, data: string}) => void} params.onFrame 每帧回调
+ * @param {number} [params.idleTimeout] 空闲多久算断了;0 = 不限
+ * @returns {Promise<void>} 流结束(或出错)才 resolve/reject
+ * @throws {Error} 失败时抛;message 是能直接展示给人看的中文原因
  */
-const readWithIdleTimeout = async (reader, ms) => {
-  if (!ms) return reader.read()
-  let timer
+export const streamSse = async ({
+  url,
+  method = 'POST',
+  headers = {},
+  body,
+  signal,
+  onFrame,
+  idleTimeout = DEFAULT_IDLE_TIMEOUT,
+}) => {
+  // 自己的控制器:空闲超时用它掐断(调用方的 signal 是另一回事,下面合起来)
+  const timeoutController = new AbortController()
+  let timedOut = false
+
+  /**
+   * 空闲看门狗
+   *
+   * <p>每来一帧就重新计时 —— 「多久没有**完整的一帧**」才是用户体感上的等待。
+   */
+  let timer = null
+  const arm = () => {
+    if (!idleTimeout) return
+    clearTimeout(timer)
+    timer = setTimeout(() => {
+      timedOut = true
+      timeoutController.abort()
+    }, idleTimeout)
+  }
+
+  // 调用方的取消 + 我们的超时,合成一个信号交给库
+  const combined = combineSignals(timeoutController.signal, signal)
+
   try {
-    return await Promise.race([
-      reader.read(),
-      new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error('连接超时,模型长时间没有回应')), ms)
-      }),
-    ])
+    arm()
+    await fetchEventSource(url, {
+      method,
+      headers: {
+        // ⚠️ **故意不写** `Accept: text/event-stream`
+        //
+        // 库会自己塞一个 `Accept: text/event-stream`(源码:`if (!headers.accept) headers.accept = ...`),
+        // 那个头去不掉。我们用 `*/*` 顶掉它 ——
+        // 后端看到的 Accept 是「什么都行」,和「完全不发这个头」是同一个意思。
+        // (实测:带 `*/*` 时后端 503 的 JSON 错误体和完全不带 Accept 一模一样。)
+        //
+        // 为什么要在意这个头:老后端在 `Accept: text/event-stream` 下返回 503 会给**空 body**,
+        // 失败原因就看不见了(见 api/conversation.js 的注释)。
+        accept: '*/*',
+        ...headers,
+      },
+      body,
+      signal: combined,
+
+      // ⚠️⚠️ **必须**开着:关掉的话,标签页一被藏起来库就 abort 掉请求,
+      //    切回来时**重新 POST 一次** —— 同一条提问被后端收两遍,记忆里多一轮。
+      openWhenHidden: true,
+
+      /**
+       * 连接建立后、开始读流之前
+       *
+       * <p>⚠️ 库默认的 onopen 只看 content-type,不是 text/event-stream 就抛一句英文,
+       *    后端真正的原因(「provider 没配 API key」)会被吃掉 —— 这里自己挖。
+       */
+      onopen: async (res) => {
+        if (!res.ok) {
+          const err = new Error(await readErrorMessage(res))
+          // 标记一下:这是「后端给的原因」,别被翻译成「网络连接失败」
+          err.kind = 'http'
+          throw err
+        }
+        const ct = (res.headers.get('content-type') || '').toLowerCase()
+        // ⚠️ 不是流的话,帧解析器会「安静地」一帧都读不出来 ——
+        //    用户只看到「模型这次没返回内容」,真相是网关返回了一张 HTML 错误页。
+        if (ct && !ct.includes('text/event-stream')) {
+          const err = new Error(`后端返回的不是流式响应（${ct}），多半是网关或代理出错了`)
+          err.kind = 'http'
+          throw err
+        }
+      },
+
+      /**
+       * 每来一帧
+       *
+       * <p>⚠️ 库里无名帧的事件类型是**空串** `''`,而 SSE 规范是 `message` ——
+       *    这里统一成 `message`,页面那边就不用管这个差别了。
+       */
+      onmessage: (msg) => {
+        arm()
+        onFrame?.({ event: msg.event || 'message', data: msg.data })
+      },
+
+      onclose: () => {},
+
+      /**
+       * 出错
+       *
+       * <p>⚠️ **必须抛出去**:不抛的话库会按 retry 间隔无限重连 ——
+       *    对 POST 来说,每次重连就是**把同一条提问重发一遍**。
+       */
+      onerror: (err) => {
+        throw err
+      },
+    })
+
+    // 走到这儿说明是「正常结束」或者「被 abort 了」
+    if (timedOut) throw new Error('连接超时，模型长时间没有回应')
+    if (signal?.aborted) {
+      // ⚠️ 库收到 abort 是**正常 resolve**,不算错 —— 上层靠这个区分「用户主动停了」
+      //    和「流正常结束」,这里把它还原成 AbortError。
+      const err = new Error('已取消')
+      err.name = 'AbortError'
+      throw err
+    }
+  } catch (e) {
+    // 用户自己掐断的(切会话/点停止)—— 原样抛出去,上层认 e.name
+    if (e.name === 'AbortError') throw e
+    // 空闲超时有专门的人话文案,别再翻译
+    if (timedOut) throw new Error('连接超时，模型长时间没有回应')
+    // 后端给的原因(403/503 + JSON 错误体)—— 原样透出,别盖掉
+    if (e.kind === 'http') throw e
+    // 网络层面的失败(后端没起、端口不通、跨域被拒)
+    if (isNetworkError(e)) {
+      throw new Error('网络连接失败，请检查后端服务是否在运行')
+    }
+    throw e
   } finally {
     clearTimeout(timer)
   }
 }
 
 /**
- * 读干一个 SSE 响应流,逐帧回调
+ * 是不是「网络层面的失败」
  *
- * ⚠️ 两个容易踩的坑:
- *   1. **UTF-8 字符可能跨分片**:一个汉字是 3 字节,网络分片正好切在中间是常事。
- *      解码必须用 `decode(value, { stream: true })`,否则那半个字会变成乱码。
- *   2. **帧可能跨分片**:`data:` 的内容还没收全就来了下一个分片 ——
- *      所以要按「空行」切,不能按「分片」切。
+ * <p>各家浏览器的说法不一样:
+ *   Chrome/Edge:「Failed to fetch」(TypeError)
+ *   Firefox:「NetworkError when attempting to fetch resource.」
+ *   Safari:「Load failed」
+ * 判断不出来的时候宁可**不翻译** —— 显示原始错误比显示一句不对的话好。
  *
- * @param {Response} response fetch 的响应(必须是 text/event-stream)
- * @param {(frame: {event: string, data: string}) => void} onFrame 每帧回调
- * @param {object} [options]
- * @param {number} [options.idleTimeout] 空闲多久算断了;0 = 不限
+ * @param {any} e
+ * @returns {boolean}
  */
-export const readSseStream = async (response, onFrame, { idleTimeout = DEFAULT_IDLE_TIMEOUT } = {}) => {
-  if (!response.body) throw new Error('这个浏览器不支持流式读取响应')
-
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder('utf-8')
-  let buffer = ''
-
-  const drain = (block) => {
-    for (const frame of parseSseFrames(block)) onFrame(frame)
-  }
-
-  try {
-    for (;;) {
-      const { done, value } = await readWithIdleTimeout(reader, idleTimeout)
-      if (done) break
-
-      buffer += decoder.decode(value, { stream: true })
-
-      // 只切「已经收到完整分隔符」的部分,剩下的留在 buffer 里等下一片
-      for (;;) {
-        const idx = buffer.search(/\r?\n\r?\n/)
-        if (idx === -1) break
-        const sep = buffer.slice(idx).match(/^\r?\n\r?\n/)[0]
-        const block = buffer.slice(0, idx)
-        buffer = buffer.slice(idx + sep.length)
-        drain(block + sep)
-      }
-    }
-
-    // 收尾:flush 掉解码器里可能还压着的字节
-    buffer += decoder.decode()
-    // 后端异常断开时最后一段可能没有空行结尾,别把它丢了
-    if (buffer.trim()) drain(buffer)
-  } finally {
-    try {
-      reader.releaseLock()
-    } catch {
-      /* 已经释放了就算了 */
-    }
-  }
+const isNetworkError = (e) => {
+  if (!e) return false
+  const msg = String(e.message || '')
+  return (
+    e instanceof TypeError ||
+    /Failed to fetch|NetworkError|Load failed|fetch failed/i.test(msg)
+  )
 }
+
+/**
+ * 信封的识别:必须是 {"v": 开头
+ *
+ * <p>为什么不直接 JSON.parse 所有分片?
+ *   1. 快路径 —— 绝大多数分片不是 JSON,省一次 try/catch
+ *   2. 旧格式的模型正文里可能**本身就是**一段 JSON(比如用户问「给我一段 JSON」),
+ *      那种情况下必须原样显示,不能被当成信封拆开
+ */
+const ENVELOPE_HEAD = /^\{\s*"v"\s*:/
 
 /**
  * 解析一个 SSE 分片的负载
  *
  * @param {string} raw event.data 的原始内容
- * @returns {string} 分片正文；空输入返回空字符串
+ * @returns {string} 分片正文;空输入返回空字符串
  */
 export const parseChunkPayload = (raw) => {
   if (typeof raw !== 'string' || raw === '') return ''
-  // 旧格式（后端还没改成 JSON 信封）：原样返回
+  // 旧格式(后端还没改成 JSON 信封):原样返回
   if (!ENVELOPE_HEAD.test(raw)) return raw
 
   try {
     const parsed = JSON.parse(raw)
     // 只要有字符串类型的 v 字段就当信封拆开 —— 不要求「只有 v 一个键」。
-    // 后端以后给信封加字段（seq / type / done）时，前端不用跟着改。
-    // 代价是模型正文正好写成 {"v":...} 时会被拆开，但那种情况很罕见。
+    // 后端以后给信封加字段(seq / type / done)时,前端不用跟着改。
+    // 代价是模型正文正好写成 {"v":...} 时会被拆开,但那种情况很罕见。
     if (parsed && typeof parsed.v === 'string') return parsed.v
   } catch {
-    // 不是合法 JSON（半截分片、被截断的信封）→ 退回旧格式的处理方式
+    // 不是合法 JSON(半截分片、被截断的信封)→ 退回旧格式的处理方式
   }
   return raw
 }

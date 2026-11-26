@@ -39,7 +39,7 @@ const TIMEOUT_REASON = '__request_timeout__'
  * @param {...(AbortSignal|undefined|null)} signals
  * @returns {AbortSignal|undefined}
  */
-const combineSignals = (...signals) => {
+export const combineSignals = (...signals) => {
   const list = signals.filter(Boolean)
   if (!list.length) return undefined
   if (list.length === 1) return list[0]

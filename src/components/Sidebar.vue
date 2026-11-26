@@ -31,10 +31,18 @@
       内层固定 w-64:
       外层宽度动画到 0 时,里面的内容会被压扁(文字挤成一团、按钮变形)。
       内层定宽 + 外层 overflow-hidden,才是「滑进去」的效果。
+
+      ⚠️ 收起时再加个 invisible:
+         宽度收到 0 之后内容还在 DOM 里,键盘 Tab 还是能 tab 到那些看不见的按钮上 ——
+         看不见但能聚焦,是比「看不见」更糟的一种状态。
+         (visibility:hidden 不影响布局,宽度动画照常。)
     -->
-    <div class="w-64 h-full flex flex-col bg-[#f9fbff] border-r border-gray-200">
-      <!-- 顶部:logo + 应用名 + 关闭(仅移动端) -->
-      <div class="h-14 shrink-0 relative flex items-center justify-center gap-2 px-4">
+    <div
+      class="w-64 h-full flex flex-col bg-[#f9fbff] border-r border-gray-200"
+      :class="collapsed ? 'md:invisible' : 'md:visible'"
+    >
+      <!-- 顶部:logo + 应用名(左) + 搜索 / 折叠(右) -->
+      <div class="h-14 shrink-0 flex items-center gap-2 px-3">
         <!--
           logo + 应用名 = 回首页的入口。
           ⚠️ 做成 <button> 而不是给 <div> 加 @click:
@@ -43,7 +51,7 @@
         <a-tooltip placement="bottom" title="回到首页">
           <button
             type="button"
-            class="flex items-center justify-center gap-2 px-2 py-1 rounded-lg
+            class="flex items-center gap-2 px-1.5 py-1 rounded-lg
                    cursor-pointer transition-colors hover:bg-gray-100"
             @click="goHome"
           >
@@ -51,13 +59,35 @@
             <span class="font-semibold text-[15px] tracking-wide text-gray-800">小哈 AI</span>
           </button>
         </a-tooltip>
-        <!--
-          关闭按钮绝对定位到右上角,而不是用 ml-auto 撑开 ——
-          logo 那一组要**居中**,用 ml-auto 的话会被按钮推得偏左。
-        -->
+
+        <!-- 搜索对话 -->
+        <a-tooltip placement="bottom" title="搜索对话">
+          <button
+            type="button"
+            class="hidden md:inline-flex ml-auto p-1.5 rounded-md text-gray-400
+                   hover:bg-gray-200/70 hover:text-gray-700 transition-colors"
+            aria-label="搜索对话"
+            @click="$emit('search')"
+          >
+            <SearchOutlined class="text-lg" />
+          </button>
+        </a-tooltip>
+
+        <!-- 折叠(仅桌面端;移动端是抽屉,由顶栏的汉堡按钮管) -->
         <button
           type="button"
-          class="absolute right-2 md:hidden p-1.5 rounded-md text-gray-400 hover:bg-gray-200 hover:text-gray-700"
+          class="hidden md:inline-flex p-1.5 rounded-md text-gray-400
+                 hover:bg-gray-200/70 hover:text-gray-700 transition-colors"
+          aria-label="收起侧边栏"
+          @click="$emit('toggle')"
+        >
+          <MenuFoldOutlined class="text-lg" />
+        </button>
+
+        <!-- 关闭按钮(仅移动端) -->
+        <button
+          type="button"
+          class="md:hidden ml-auto p-1.5 rounded-md text-gray-400 hover:bg-gray-200 hover:text-gray-700"
           aria-label="关闭侧边栏"
           @click="$emit('close')"
         >
@@ -69,12 +99,13 @@
       <div class="px-3 pb-3 shrink-0">
         <button
           type="button"
-          class="mx-auto w-fit flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm
-                 new-chat-btn transition-colors cursor-pointer"
+          class="w-full flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm
+                 border border-gray-200 bg-white text-gray-700
+                 hover:border-gray-300 hover:bg-gray-50 transition-colors cursor-pointer"
           @click="goHome"
         >
           <PlusOutlined class="text-base" />
-          新对话
+          开启新对话
         </button>
       </div>
 
@@ -152,7 +183,7 @@ const props = defineProps({
   drawerOpen: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['close'])
+const emit = defineEmits(['close', 'toggle', 'search'])
 
 const route = useRoute()
 const router = useRouter()
@@ -214,27 +245,6 @@ const doDelete = async (uuid) => {
 </script>
 
 <style scoped>
-/*
-  「新对话」按钮:浅蓝底 + 品牌色字。
-  颜色写在这儿而不是用 Tailwind 任意值类,
-  是因为 hover 态要的是**另一个**浅一档的蓝,
-  两个颜色成对出现,放一起更好维护。
-*/
-.new-chat-btn {
-  background-color: rgb(219 234 254);
-  color: #4d6bfe;
-}
-
-.new-chat-btn:hover {
-  background-color: #c6dcf8;
-}
-
-/* 键盘 Tab 过去时要有可见的焦点圈(鼠标点击不显示) */
-.new-chat-btn:focus-visible {
-  outline: 2px solid #4d6bfe;
-  outline-offset: 2px;
-}
-
 /* 侧边栏滚动条:颜色淡一点,不抢会话标题的视线 */
 .chat-scroll {
   scrollbar-width: thin;
