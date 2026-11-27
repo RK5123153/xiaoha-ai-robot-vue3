@@ -109,6 +109,26 @@
         </button>
       </div>
 
+      <!--
+        工具入口:AI 智能客服。
+
+        ⚠️ 做成 <button> 而不是 <li @click>:
+           li 不可聚焦 —— 键盘 Tab 不到,读屏软件也不会把它念成可点的按钮。
+        ⚠️ 这条入口是**顶层路由**(不在 Layout 里),所以不需要考虑
+           「切过去之后侧边栏还在不在」—— 它整个换掉了。
+      -->
+      <div class="px-3 pb-3 shrink-0">
+        <button
+          type="button"
+          class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm
+                 text-gray-600 hover:bg-gray-100 transition-colors cursor-pointer"
+          @click="goCustomerService"
+        >
+          <CustomerServiceOutlined class="text-base" />
+          智能客服
+        </button>
+      </div>
+
       <!-- 会话列表 -->
       <!--
         ⚠️ data-chat-list:脚本里要定位「会话列表这个滚动容器」,
@@ -194,6 +214,7 @@ import { message as antMessage } from 'ant-design-vue'
 import ChatListItem from '@/components/ChatListItem.vue'
 import BrandLogo from '@/components/BrandLogo.vue'
 import { useSessionStore } from '@/stores/sessions.js'
+import { describeError } from '@/api/base.js'
 
 /** 会话列表放在 store 里 —— 侧边栏和聊天页都要知道「有哪些会话」 */
 const sessionStore = useSessionStore()
@@ -226,6 +247,18 @@ const openChat = (uuid) => {
   emit('close')
   if (uuid === activeUuid.value) return
   router.push({ name: 'chat', params: { uuid } })
+}
+
+/**
+ * 去 AI 智能客服页
+ *
+ * <p>⚠️ 用命名路由,别写死路径(见文件头的约定)。
+ * <p>emit('close'):移动端那边侧边栏是抽屉 —— 不关的话,
+ *    切过去之后抽屉还盖在屏幕上(那一页压根没有侧边栏,抽屉是「关着的」才对)。
+ */
+const goCustomerService = () => {
+  emit('close')
+  router.push({ name: 'customer-service' })
 }
 
 /** 会话列表的滚动容器 */
@@ -353,30 +386,10 @@ const pending = reactive(new Set())
 /**
  * 把异常翻译成一句能给人看的原因
  *
- * <p>后端给的错误体是 Spring 的形状,原因在 message 里(base.js 已经挖出来了),
- *    直接显示即可。
- *
- * <p>⚠️ 但**网络层的错误是英文的**:后端没起来时,原生 fetch 抛的是
- *    "Failed to fetch"(Chrome)/ "Load failed"(Safari)——
- *    「后端没起来」恰恰是最常见的失败,却只能甩一句英文给用户。
- *    这类一律换成中文。
- *
- * <p>⚠️ 同理还有代理给的 502/503/504:那是「代理连不上后端」,
- *    翻译过来是同一件事 —— 后端没在跑。
- *
- * @param {unknown} e
- * @param {string} fallback 后端不可达时的兜底文案
- * @returns {string}
+ * <p>⚠️ 实现搬到了 api/base.js 的 {@link describeError} —— 「网络层的错误是英文的」
+ *    这件事不止这一处要用(问答文件管理那边也要),写两遍迟早改漏一边。
  */
-const reasonOf = (e, fallback) => {
-  const msg = String(e?.message || '')
-  if (!msg) return fallback
-  const unreachable =
-    /failed to fetch|load failed|networkerror|network request failed/i.test(msg) ||
-    /HTTP (502|503|504)\b/.test(msg)
-  if (unreachable) return `${fallback},请检查后端服务是否在运行`
-  return msg
-}
+const reasonOf = (e, fallback) => describeError(e, fallback)
 
 /**
  * 改名

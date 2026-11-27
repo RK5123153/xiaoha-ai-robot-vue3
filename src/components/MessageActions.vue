@@ -85,6 +85,7 @@
 
     <!-- 点赞 -->
     <button
+      v-if="showFeedback"
       type="button"
       class="action-btn"
       :class="{ 'is-active': feedback === 'up' }"
@@ -97,6 +98,7 @@
 
     <!-- 点踩 -->
     <button
+      v-if="showFeedback"
       type="button"
       class="action-btn"
       :class="{ 'is-active': feedback === 'down' }"
@@ -134,6 +136,17 @@ const props = defineProps({
   },
   /** 能不能重新生成（问候语没有对应的提问，给 false 就不显示这个按钮） */
   canRegenerate: {
+    type: Boolean,
+    default: true,
+  },
+  /**
+   * 要不要显示点赞 / 点踩
+   *
+   * <p>智能客服页关掉它:客服问答是**无状态**的(不归档、没有「第 k 轮」),
+   *    反馈接口要的是 (chatId, turnIndex) —— 拿客服页的轮次去上报,
+   *    会把主对话的反馈记录搅乱(事后对账时反馈指错了回答)。
+   */
+  showFeedback: {
     type: Boolean,
     default: true,
   },

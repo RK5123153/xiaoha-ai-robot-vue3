@@ -65,8 +65,14 @@
         多模态那条路(/v9)后端不接模型、也不接联网搜索和工具。
         摆成正常的样子就是「点了没反应」的假开关,所以直接置灰,
         鼠标悬停说明为什么。
+
+        ⚠️ showCapabilities = false 时**整组不渲染**(不是置灰):
+        智能客服那条路(/customer-service/chat)后端只认「一个问题」——
+        不接模型选择、不接联网搜索、不接 MCP 工具。
+        摆出来就是三个「点了没反应」的假开关,直接收掉更诚实。
       -->
       <a-tooltip
+        v-if="showCapabilities"
         :title="vision ? '看图问答走的是多模态接口,模型 / 联网搜索 / 工具这次都不生效' : ''"
         placement="top"
       >
@@ -78,7 +84,12 @@
       </a-tooltip>
 
       <div class="flex items-center gap-2 ml-auto">
-        <ImagePicker :disabled="busy" @pick="onPickImage" />
+        <!--
+          ⚠️ showImagePicker = false 时连「拖进来 / 粘贴图」也不收 ——
+          收下了又发不出去(客服那条路只收一个字符串),
+          用户看到的是「图挂在输入框里,发出去了,客服那边压根没收到」。
+        -->
+        <ImagePicker v-if="showImagePicker" :disabled="busy" @pick="onPickImage" />
         <!--
           ⚠️ 发送按钮用 aria-disabled 而不是 disabled:
           disabled 的按钮在浏览器里**不派发鼠标事件**,antd 的 Tooltip 靠的就是这些事件
@@ -206,6 +217,26 @@ const props = defineProps({
   loading: {
     type: Boolean,
     default: false,
+  },
+  /**
+   * 展示「工具 / 模型 / 联网搜索」那一组开关
+   *
+   * <p>智能客服页关掉它:那条路(/customer-service/chat)后端只认「一个问题」——
+   *    不接模型选择、不接联网搜索、不接 MCP 工具。
+   *    摆出来就是三个「点了没反应」的假开关。
+   */
+  showCapabilities: {
+    type: Boolean,
+    default: true,
+  },
+  /**
+   * 展示「图片」按钮(以及拖进来 / 粘贴图)
+   *
+   * <p>智能客服页关掉它:那条路只收一个字符串,图片压根发不过去。
+   */
+  showImagePicker: {
+    type: Boolean,
+    default: true,
   },
 })
 
@@ -339,6 +370,8 @@ const onStop = () => {
 let dragDepth = 0
 
 const onDragEnter = () => {
+  // 这一页不支持发图 → 连「可以放这儿」的高亮都不给
+  if (!props.showImagePicker) return
   dragDepth++
   isDragOver.value = true
 }
@@ -354,10 +387,17 @@ const onDragLeave = () => {
  * <p>⚠️ 只认图片:拖进来一个 txt 的话,后端会 400,
  *    而且 Spring AI 会**静默丢掉**非图片附件(症状是「图没发出去,模型只看到一句话」),
  *    所以前端先拦一道,给人话。
+ *
+ * <p>⚠️ 这一页压根不支持发图(showImagePicker = false)时也别收 ——
+ *    收下了发不出去,用户看到的是「图挂在输入框里,发出去了,对面压根没收到」。
  */
 const onDrop = (e) => {
   dragDepth = 0
   isDragOver.value = false
+  if (!props.showImagePicker) {
+    antMessage.info('当前页面不支持发送图片')
+    return
+  }
   const files = e.dataTransfer?.files || []
   for (const f of files) {
     if (isImageFile(f)) {
@@ -375,6 +415,7 @@ const onDrop = (e) => {
  *    把文字也挡掉的话用户会觉得「粘贴失灵了」。
  */
 const onPaste = (e) => {
+  if (!props.showImagePicker) return
   const items = e.clipboardData?.items
   if (!items) return
   for (const item of items) {

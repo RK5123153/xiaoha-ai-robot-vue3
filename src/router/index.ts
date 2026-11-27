@@ -34,6 +34,21 @@ const routes = [
             }
         ]
     },
+    // AI 智能客服 —— **不在 Layout 里面**。
+    //
+    // ⚠️ 为什么单独一个顶层路由:
+    //    客服问答是**无状态**的(后端不接聊天记忆、也不归档)——
+    //    左边栏那份「历史对话列表」对它没有意义,摆在那儿只会让人以为
+    //    刚才那轮问答被存下来了(其实刷新就没了)。
+    //    所以这一页自己带一个顶栏(返回 / 标题 / 重新开始)。
+    {
+        path: '/customer-service',
+        name: 'customer-service',
+        component: () => import('@/views/CustomerServicePage.vue'),
+        meta: {
+            title: '智能客服'
+        }
+    },
     // 认不出来的地址一律回首页(别给用户一个白屏)
     {
         path: '/:pathMatch(.*)*',

@@ -5,7 +5,7 @@
     不统一的话同一个页面里会同时出现两种蓝。
     主题放这儿而不是每个组件里各写各的:以后引入 Dropdown / Modal 时自动就是这个色。
   -->
-  <a-config-provider :theme="antdTheme">
+  <a-config-provider :theme="antdTheme" :locale="zhCN">
     <router-view />
   </a-config-provider>
 </template>
@@ -13,6 +13,9 @@
 <script setup>
 // 这里给 message 起别名:两个页面里已经有叫 message 的变量(输入框的草稿)
 import { ConfigProvider, message as antMessage } from 'ant-design-vue'
+// antd 的中文语言包 —— 默认是英文的:分页条是 "items per page"、
+// 空列表是 "No Data"、确认框的按钮是 "OK / Cancel"
+import zhCN from 'ant-design-vue/es/locale/zh_CN'
 
 /**
  * antd 组件的全局主题
@@ -57,4 +60,12 @@ ConfigProvider.config({ theme: antdTheme })
  * <p>duration: 3 秒 —— 和原来手写的那个一致。
  */
 antMessage.config({ maxCount: 1, duration: 3 })
+
+/**
+ * 把语言包也设成「全局的」
+ *
+ * <p>和主题一个道理:静态 API(Modal.confirm 这种直接调的)不读组件树上的
+ * ConfigProvider,只认这份全局配置 —— 不设的话,静态弹窗的按钮还是英文的。
+ */
+ConfigProvider.config({ theme: antdTheme, locale: zhCN })
 </script>

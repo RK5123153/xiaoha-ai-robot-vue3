@@ -64,6 +64,27 @@
   }
 }
 
+/* ---------- 拖动抽屉宽度时:把 antd 的过渡关掉 ----------
+   antd 给 .ant-drawer-content-wrapper 加了 transition: all .3s ——
+   每改一次宽度就重播一遍动画,抽屉会「追着」鼠标慢半拍,拖起来很卡。
+   拖的时候给面板挂上 .xh-drawer-resizing,过渡就断了(松手自动摘掉)。
+
+   ⚠️ 这条**必须**是全局样式:抽屉是 portal 到 body 的,
+   组件里的 scoped CSS(带作用域属性)根本匹配不到它。 */
+.ant-drawer-content-wrapper.xh-drawer-resizing {
+  transition: none !important;
+}
+
+/* ---------- 页面别长出横向滚动条 ----------
+   浮层(提示条 / 下拉 / 抽屉)都是 portal 到 body 的,贴着屏幕右边时
+   有一两个像素露到外面 —— 整页就会多出一条横向滚动条,内容被推得晃。
+   overflow-x: clip 把多出来的那点**切掉**(不是藏滚动条):
+   用 clip 而不是 hidden —— hidden 会让 overflow-y 跟着变成 auto,
+   body 就变成滚动容器,页面滚动会整个变样。 */
+html {
+  overflow-x: clip;
+}
+
 /* color palette from <https://github.com/vuejs/theme> */
 body {
   font-family:

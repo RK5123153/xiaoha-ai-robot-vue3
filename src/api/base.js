@@ -192,3 +192,31 @@ export const getJson = async (url) => {
   if (!res.ok) throw new Error(await readErrorMessage(res))
   return res.json()
 }
+
+/**
+ * 把异常翻译成一句能给人看的原因
+ *
+ * <p>后端给的错误体是 Spring 的形状,原因在 {@code message} 里
+ *    ({@link readErrorMessage} 已经挖出来了),直接显示即可。
+ *
+ * <p>⚠️ 但**网络层的错误是英文的**:后端没起来时,原生 fetch 抛的是
+ *    "Failed to fetch"(Chrome)/ "Load failed"(Safari)——
+ *    「后端没起来」恰恰是最常见的失败,却只能甩一句英文给用户。
+ *    这类一律换成中文。
+ *
+ * <p>⚠️ 同理还有代理给的 502/503/504:那是「代理连不上后端」,
+ *    翻译过来是同一件事 —— 后端没在跑。
+ *
+ * @param {unknown} e 捕获到的异常
+ * @param {string} fallback 后端不可达时的兜底文案(比如「上传失败」)
+ * @returns {string}
+ */
+export const describeError = (e, fallback) => {
+  const msg = String(e?.message || '')
+  if (!msg) return fallback
+  const unreachable =
+    /failed to fetch|load failed|networkerror|network request failed/i.test(msg) ||
+    /HTTP (502|503|504)\b/.test(msg)
+  if (unreachable) return `${fallback}，请检查后端服务是否在运行`
+  return msg
+}

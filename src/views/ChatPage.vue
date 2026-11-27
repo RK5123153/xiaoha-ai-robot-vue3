@@ -185,6 +185,7 @@ import BrandLogo from '@/components/BrandLogo.vue'
 import ChatInputBox from '@/components/ChatInputBox.vue'
 import ImagePreview from '@/components/ImagePreview.vue'
 import { parseChunkPayload } from '@/utils/sse.js'
+import { appendThinking } from '@/utils/thinking.js'
 import {
   lastRegenerableId,
   turnIndexOf as turnIndexOfMessage,
@@ -758,27 +759,6 @@ const handleStop = () => {
   userStopped = true
   stopStream()
   visionController?.abort()
-}
-
-/**
- * 思考链最多留多长(字)
- *
- * <p>⚠️ 思考链可能很长(实测一两千字),全留着气泡会越来越重;
- *    而且有用的是**最后**那几段(它在说什么、准备干什么),
- *    所以超长就从**前面**截掉。
- */
-const THINKING_MAX = 4000
-
-/**
- * 攒思考链
- *
- * @param {string} current 已有的思考链
- * @param {string} add     新来的一段
- * @returns {string} 新的思考链
- */
-const appendThinking = (current, add) => {
-  const next = (current || '') + (add || '')
-  return next.length > THINKING_MAX ? next.slice(next.length - THINKING_MAX) : next
 }
 
 /**

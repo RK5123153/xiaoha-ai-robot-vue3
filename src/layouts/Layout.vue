@@ -93,7 +93,7 @@
         </h1>
 
         <!-- 分享:复制当前会话的链接 -->
-        <a-tooltip v-if="chatId" title="复制会话链接" placement="bottom">
+        <a-tooltip v-if="chatId" title="复制会话链接" placement="bottomRight">
           <button
             type="button"
             class="ml-auto shrink-0 p-1.5 rounded-md text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
