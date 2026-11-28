@@ -83,7 +83,7 @@
           <!-- 回复的内容（Markdown 渲染） -->
           <div class="w-full max-w-[80%] mb-2">
             <!--
-              等待模型回答时的进度显示。
+              深度思考:后端流过来的思考链(event: thinking)。
 
               ⚠️ 为什么要把思考链显示出来:
                  后端等模型开口的这段时间可能很长(要先调工具:天气/联网搜索,
@@ -94,8 +94,13 @@
 
               ⚠️ 思考链**不混进正文**:它是模型的内部推理(还可能是英文的),
                  单独一块、灰字、小字;正文那块保持干净。
+
+              ⚠️ 判据是「**有没有思考链**」,不是「还在不在等」:
+                 思考链是这一轮的一部分,正文出来了它也还在(用户可能要回看);
+                 后端把它归档在 t_chat_message.reasoning,拉历史时一起带回来 ——
+                 刷新页面也能翻出来(见 mapHistory)。
             -->
-            <ThinkingPanel v-if="chat.pending && chat.thinking" :text="chat.thinking" />
+            <ThinkingPanel v-if="chat.thinking" :text="chat.thinking" :phase="phaseOf(chat)" />
             <!-- 没有思考链的模型(不给 reasoning)→ 至少给个转圈 -->
             <div
               v-else-if="chat.pending"
@@ -185,7 +190,7 @@ import BrandLogo from '@/components/BrandLogo.vue'
 import ChatInputBox from '@/components/ChatInputBox.vue'
 import ImagePreview from '@/components/ImagePreview.vue'
 import { parseChunkPayload } from '@/utils/sse.js'
-import { appendThinking } from '@/utils/thinking.js'
+import { appendThinking, phaseOf } from '@/utils/thinking.js'
 import {
   lastRegenerableId,
   turnIndexOf as turnIndexOfMessage,
@@ -544,6 +549,10 @@ const mapHistory = (list) => {
       out.push({
         ...base,
         role: 'assistant',
+        // ⚠️ 思考链:后端把这一轮的推理全文归档在 t_chat_message.reasoning,
+        //    拉历史时一起带回来 —— 刷新页面也能回看当时的思考过程。
+        //    (流式时收到的是同一份内容,只是那时候还没落库。)
+        thinking: m.reasoning || '',
         // ⚠️ 失败轮次:新后端会把失败原因存进正文(刷新后看到的就是它);
         //    但**改之前**存的老数据正文是空的 —— 补一句说明,
         //    别让用户看到一个空气泡,以为模型啥也没说就结束了
@@ -762,22 +771,30 @@ const handleStop = () => {
 }
 
 /**
- * 发起一次流式请求，把正文写进第 replyIndex 条消息
+ * 发起一次流式请求，把正文写进 reply 这条消息
  *
  * 单独抽出来是因为「发送」和「重新生成」共用同一套流式逻辑 ——
  * 重新生成只是把同样的提问再发一次、写到同一条气泡里。
  *
  * @param {string} userMessage 用户提问原文
- * @param {number} replyIndex  要写入的回复消息下标
+ * @param {object} reply       要写入的那条回复消息(**chatList 里的响应式代理**)
  * @returns {Promise<{completed: boolean, archived: boolean}>}
  *   completed —— 这一轮是不是正常走完了(出错/被掐断 = false)
  *   archived  —— 后端有没有把这一轮记进归档(= 会话的总轮数要不要 +1)
  */
-const startStream = async (userMessage, replyIndex) => {
-  // 通过 chatList 取（而不是直接持有 push 进去的原始对象）才能触发 Vue 响应式更新
-  // ⚠️ 可能取不到:流跑到一半用户切了会话,chatList 已经被换掉了。
-  //    所以每次用之前都要判空 —— 否则会在这儿抛 TypeError,白屏。
-  const reply = () => chatList.value[replyIndex]
+const startStream = async (userMessage, reply) => {
+  // ⚠️ 直接用传进来的**响应式代理**,不要每帧按 replyIndex 回 chatList 里取:
+  //
+  //   1. 按下标取 → 用户往上翻页时,更早的消息被拼到**最前面**(mapHistory 拼前面),
+  //      chatList 的下标整体错位 —— 正在流的这条消息会被写到**别的**消息上。
+  //      (实测:长会话里模型正在答、用户往上一滑,答案和思考链一起跑进了**历史消息**里,
+  //       新消息一直空着 —— 用户看到的是「刚才那条回答莫名其妙变了」。)
+  //   2. 传代理 → chatList 被整个换掉时(切会话),手里这个就成了「孤儿」,
+  //      往它上面写不报错、也不更新界面 —— 正好是想要的(那一轮已经作废了)。
+  //
+  //   ⚠️ 代理必须是**响应式**的(从 chatList 里取),不是 push 进去的原始对象 ——
+  //      原始对象不是响应式的,往它上面写界面不会更新。
+  const target = reply
 
   // 这一轮不是用户主动停的(上一次停过了,别把标记带过来)
   userStopped = false
@@ -823,10 +840,8 @@ const startStream = async (userMessage, replyIndex) => {
         // ⚠️ 必须解析:后端用 JSON 信封,data 是 {"v":"正文"} 而不是正文本身。
         //    parseChunkPayload 同时认新旧两种格式,前后端谁先上线都行。
         const payload = parseChunkPayload(data)
-        const target = reply()
         // ⚠️ 收到帧 = 后端已经在处理这一轮了 → 它会把它记进归档
         archived = true
-        if (!target) return
         if (event === 'message') {
           responseText += payload
           target.content = responseText
@@ -840,10 +855,16 @@ const startStream = async (userMessage, replyIndex) => {
           // 但要攒起来单独显示 —— 等模型开口可能很久(要先调工具),
           // 这期间后端 SSE 一个字节都不发,只转圈用户会以为卡死了;
           // 思考链里写着它在干什么(「我先并行查询北京、上海…」),那才是有用的等待反馈。
-          // 正文已经开始输出后就不再退回「正在思考」状态
+          //
+          // ⚠️ **一律攒起来**,不管正文出没出:
+          //    后端一帧里可能同时有正文和思考链(OpenAI 协议下思考链和正文是交错的),
+          //    只在「还没出正文」时攒的话,思考链的后半截会被整段丢掉 ——
+          //    用户看到的推理过程是残的,刷新后看归档的全文又对不上。
+          target.thinking = appendThinking(target.thinking, payload)
+          // 但「正在思考」的提示只在正文还没开始时显示 ——
+          // 正文都出来了还转圈,用户会以为卡住了
           if (!responseText) {
             target.pending = true
-            target.thinking = appendThinking(target.thinking, payload)
           }
         } else if (event === 'error') {
           serverError = payload
@@ -857,8 +878,7 @@ const startStream = async (userMessage, replyIndex) => {
     })
 
     // 流正常结束却一个字都没有 → 给个能看的提示，别留个空气泡
-    const target = reply()
-    if (target && !target.content) {
+    if (!target.content) {
       target.content = serverError || '抱歉，模型这次没返回内容，请再试一次。'
       target.failed = '' // 原因已经当正文了,别再在下面显示一遍
     }
@@ -867,10 +887,9 @@ const startStream = async (userMessage, replyIndex) => {
     // 流正常结束 = 后端处理完了 → 这一轮进了归档
     archived = true
   } catch (e) {
-    const target = reply()
-    // ⚠️ 流跑到一半用户切了会话,chatList 已经被换掉了 —— 这条气泡没了,
-    //    没什么可收拾的(但结果要return出去,别让调用方拿到 undefined)
-    if (!target) return { completed, archived }
+    // ⚠️ 用户切了会话的话,target 已经是个「孤儿代理」了 —— 往它上面写不会更新界面,
+    //    正好是想要的(那一轮已经作废,不该再往页面上写)。
+    //    但结果要return出去,别让调用方拿到 undefined。
     if (e.name === 'AbortError') {
       // ⚠️ 请求已经发出去了(中止发生在发送之后),后端会把它记成一轮「被中断」——
       //    总轮数要算上它,不然后面每一轮的编号都少一格
@@ -894,12 +913,9 @@ const startStream = async (userMessage, replyIndex) => {
       }
     }
   } finally {
-    const target = reply()
-    if (target) {
-      target.pending = false
-      // done：输出结束 —— 操作栏（朗读/复制/重新生成/点赞/点踩）这时候才出现
-      target.done = true
-    }
+    target.pending = false
+    // done：输出结束 —— 操作栏（朗读/复制/重新生成/点赞/点踩）这时候才出现
+    target.done = true
     if (streamController === controller) streamController = null
     isSending.value = false
     // 侧边栏的会话列表要跟着更新(标题、消息数、最后更新时间)
@@ -916,11 +932,12 @@ const startStream = async (userMessage, replyIndex) => {
  *
  * @param {File} file      要看的图
  * @param {string} question 问什么
- * @param {number} replyIndex 写到第几条回复
+ * @param {object} reply   要写入的那条回复消息(chatList 里的响应式代理,同 startStream)
  */
-const runVisionRequest = async (file, question, replyIndex) => {
-  // ⚠️ 可能取不到:流跑到一半用户切了会话,chatList 已经被换掉了(同 startStream)
-  const reply = () => chatList.value[replyIndex]
+const runVisionRequest = async (file, question, reply) => {
+  // ⚠️ 直接用传进来的代理,不要每帧按下标去取(同 startStream 的说明:
+  //    往上翻页会把老消息拼到前面,下标会错位,答案就写进别的消息里去了)
+  const target = reply
   // 这一轮不是用户主动停的
   userStopped = false
   const controller = new AbortController()
@@ -935,23 +952,19 @@ const runVisionRequest = async (file, question, replyIndex) => {
       model: visionModel,
       signal: controller.signal,
       onThinking: (text) => {
-        // 正文还没出来时维持「正在思考…」;出正文了就撤掉
-        // ⚠️ 思考链也要攒起来单独显示(同文字对话那条链路)
-        const target = reply()
-        if (target && !target.content) {
+        // ⚠️ 思考链一律攒起来,不管正文出没出(同文字对话那条链路)
+        target.thinking = appendThinking(target.thinking, text)
+        // 「正在思考」的提示只在正文还没出来时显示
+        if (!target.content) {
           target.pending = true
-          target.thinking = appendThinking(target.thinking, text)
         }
       },
       onServerError: (reason) => {
         serverError = reason
         // ⚠️ 同文字对话:失败原因要记在气泡上,不能只在「内容为空」时才显示
-        const t = reply()
-        if (t) t.failed = reason
+        target.failed = reason
       },
       onChunk: (_delta, all) => {
-        const target = reply()
-        if (!target) return
         target.content = all
         // ⚠️ 同文字对话:空分片不算「出正文了」,加载动画要继续转
         //    (不然会空出一段「动画没了、字也没有」的时间)
@@ -959,14 +972,11 @@ const runVisionRequest = async (file, question, replyIndex) => {
       },
     })
     // 流正常结束却一个字都没有 → 给个能看的提示，别留个空气泡
-    const target = reply()
-    if (target && !target.content) {
+    if (!target.content) {
       target.content = serverError || '抱歉，模型这次没返回内容，请再试一次。'
       target.failed = '' // 原因已经当正文了,别再在下面显示一遍
     }
   } catch (e) {
-    const target = reply()
-    if (!target) return
     if (e.name === 'AbortError') {
       if (userStopped) {
         // 用户主动点了「停止」—— 答出来的一半留着,下面标一句「已停止生成」
@@ -985,11 +995,8 @@ const runVisionRequest = async (file, question, replyIndex) => {
       }
     }
   } finally {
-    const target = reply()
-    if (target) {
-      target.pending = false
-      target.done = true
-    }
+    target.pending = false
+    target.done = true
     if (visionController === controller) visionController = null
     isSending.value = false
   }
@@ -1048,7 +1055,9 @@ const sendTextMessage = async () => {
   // turn：这一轮是本次会话的第几轮 —— 交给 renumberTurns 统一编号
   //   (问候语是第 0 轮，没有对应的提问，所以不显示「重新生成」按钮)
   chatList.value.push({ id: genId(), role: 'assistant', kind: 'text', content: '', pending: true, done: false, failed: '', turn: 0, thinking: '' })
-  const replyIndex = chatList.value.length - 1
+  // ⚠️ 抓那条消息的**响应式代理**(不是下标):往上翻页会把老消息拼到前面,
+  //    下标会错位 —— 按下标写的话,答案会跑进别的消息里(见 startStream 的说明)
+  const reply = chatList.value[chatList.value.length - 1]
   // 编号:第几轮(窗口前面压着几轮 + 窗口里的第几条提问)
   // ⚠️ 分页加载时窗口前面还压着别的轮次,不能简单数窗口里的提问条数 ——
   //    renumberTurns 拿后端报的总轮次算出那个偏移(见 renumberTurns 的说明)
@@ -1062,7 +1071,7 @@ const sendTextMessage = async () => {
   // 强制滚到底：用户刚发了消息，无条件跟随
   scrollToBottom(true)
 
-  const { completed, archived } = await startStream(userMessage, replyIndex)
+  const { completed, archived } = await startStream(userMessage, reply)
   // ⚠️ 后端把这一轮记进归档了 → 会话的总轮数 +1
   //    (没记的话就不能加:总轮数是轮次号的基准,多算一轮后面全偏)
   if (archived) {
@@ -1114,7 +1123,8 @@ const sendVisionMessage = async () => {
   // ⚠️ 必须在**推完回复消息之后**再算下标 ——
   //    早一行的话这个下标指向的是用户消息，模型的回答会写进用户气泡里，
   //    而真正的回复气泡一直停在「正在思考…」(done 永远是 false，操作栏不出现)。
-  const replyIndex = chatList.value.length - 1
+  // ⚠️ 抓那条消息的**响应式代理**(同 sendTextMessage 的说明)
+  const reply = chatList.value[chatList.value.length - 1]
 
   // 图已经随消息发出去了，输入框复位
   // ⚠️ 直接置空,不走 removeImage():气泡里的缩略图还在用这个预览地址,
@@ -1124,7 +1134,7 @@ const sendVisionMessage = async () => {
   inputRef.value?.focus()
   scrollToBottom(true)
 
-  await runVisionRequest(att.file, question, replyIndex)
+  await runVisionRequest(att.file, question, reply)
 }
 
 /**
@@ -1182,6 +1192,8 @@ const regenerateText = async (idx) => {
     }
 
     // 2. 清空当前气泡，重新流式请求（写回同一条消息）
+    // ⚠️ 抓**代理**而不是下标:回滚这一步是个 await,期间用户可能往上翻页
+    //    (老消息被拼到前面 → 下标错位 → 重新生成的答案会写进别的消息)
     const target = chatList.value[idx]
     target.content = ''
     target.pending = true
@@ -1192,7 +1204,7 @@ const regenerateText = async (idx) => {
     target.thinking = '' // ⚠️ 上一轮的思考链也要清掉,不然两轮的思考混在一起看
     scrollToBottom(true)
 
-    await startStream(question.content, idx)
+    await startStream(question.content, target)
   } catch (e) {
     console.error('重新生成失败: ', e)
     antMessage.info('重新生成失败，请稍后重试')
@@ -1341,8 +1353,10 @@ onBeforeUnmount(() => {
 /**
  * 切换会话时(同一个组件复用,只是路由参数变了)
  *
- * ⚠️ 正在跑的流必须掐断:不然它的分片会继续往 replyIndex 写,
+ * ⚠️ 正在跑的流必须掐断:不然它的分片会继续往那条消息上写,
  *    而 chatList 已经被新会话的历史换掉了 —— 回答会串到别人的会话里。
+ *    (写的是抓在手里的响应式代理,chatList 换掉之后它就成了「孤儿」,
+ *     往它上面写不会再更新界面 —— 但请求本身还在烧后端的 token,所以要掐。)
  */
 watch(
   () => chatId.value,

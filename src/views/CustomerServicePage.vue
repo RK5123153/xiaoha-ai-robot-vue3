@@ -95,8 +95,11 @@
                 思考链:单独一块、灰字、小字,**不混进正文**。
                 客服这条链路要先做一次向量检索(还要调 embedding 接口),
                 等它的时候后端一个字节都不发 —— 光一个「正在思考…」用户会以为卡死了。
+
+                ⚠️ 判据是「**有没有思考链**」,不是「还在不在等」:
+                   思考链是这一轮的一部分,正文出来了它也还在(用户可能要回看)。
               -->
-              <ThinkingPanel v-if="msg.pending && msg.thinking" :text="msg.thinking" />
+              <ThinkingPanel v-if="msg.thinking" :text="msg.thinking" :phase="phaseOf(msg)" />
               <!-- 没有思考链 → 至少给个转圈 -->
               <div
                 v-else-if="msg.pending"
@@ -184,7 +187,7 @@ import ChatInputBox from '@/components/ChatInputBox.vue'
 import BrandLogo from '@/components/BrandLogo.vue'
 import KnowledgeFileDrawer from '@/components/KnowledgeFileDrawer.vue'
 import { parseChunkPayload } from '@/utils/sse.js'
-import { appendThinking } from '@/utils/thinking.js'
+import { appendThinking, phaseOf } from '@/utils/thinking.js'
 import { customerServiceApi } from '@/api/customer-service.js'
 import { useServiceStore } from '@/stores/service.js'
 import { useDraft } from '@/composables/useDraft.js'
@@ -440,9 +443,12 @@ const runStream = async (question, replyIndex) => {
         } else if (event === 'thinking') {
           // 思考链不混进正文,但要攒起来单独显示(等检索/等模型的时候,
           // 后端可能一个字节都不发,只转圈用户会以为卡死了)
+          // ⚠️ **一律攒起来**,不管正文出没出:后端一帧里可能同时有正文和思考链,
+          //    只在「还没出正文」时攒的话,思考链的后半截会被整段丢掉
+          target.thinking = appendThinking(target.thinking, payload)
+          // 但「正在思考」的提示只在正文还没开始时显示
           if (!responseText) {
             target.pending = true
-            target.thinking = appendThinking(target.thinking, payload)
           }
         } else if (event === 'error') {
           serverError = payload
