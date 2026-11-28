@@ -99,10 +99,23 @@
                 ⚠️ 判据是「**有没有思考链**」,不是「还在不在等」:
                    思考链是这一轮的一部分,正文出来了它也还在(用户可能要回看)。
               -->
-              <ThinkingPanel v-if="msg.thinking" :text="msg.thinking" :phase="phaseOf(msg)" />
-              <!-- 没有思考链 → 至少给个转圈 -->
+              <!--
+                后端把这一轮挂起(pause_turn)时,它会**自己重发一次** ——
+                收到 event: retry 就把「正在重试」亮出来。
+                ⚠️ 文案是后端给的(前端不自己另写一套)。
+              -->
               <div
-                v-else-if="msg.pending"
+                v-if="msg.retrying"
+                class="flex items-center gap-2 text-sm text-gray-400 mb-1"
+              >
+                <LoadingDots size="sm" label="正在重试" />
+                <span class="retry-notice">{{ msg.retryNotice || '正在重试…' }}</span>
+              </div>
+              <ThinkingPanel v-if="msg.thinking" :text="msg.thinking" :phase="phaseOf(msg)" />
+              <!-- 没有思考链 → 至少给个转圈
+                   ⚠️ 重试中不显示这个:上面已经有一条「正在重试」了,两条挨着像故障 -->
+              <div
+                v-else-if="msg.pending && !msg.retrying"
                 class="flex items-center gap-2 text-sm text-gray-400 mb-1"
               >
                 <LoadingDots size="sm" label="正在思考" />
@@ -186,8 +199,8 @@ import MessageActions from '@/components/MessageActions.vue'
 import ChatInputBox from '@/components/ChatInputBox.vue'
 import BrandLogo from '@/components/BrandLogo.vue'
 import KnowledgeFileDrawer from '@/components/KnowledgeFileDrawer.vue'
-import { parseChunkPayload } from '@/utils/sse.js'
-import { appendThinking, phaseOf } from '@/utils/thinking.js'
+import { createStreamCollector } from '@/utils/stream-events.js'
+import { phaseOf } from '@/utils/thinking.js'
 import { customerServiceApi } from '@/api/customer-service.js'
 import { useServiceStore } from '@/stores/service.js'
 import { useDraft } from '@/composables/useDraft.js'
@@ -395,6 +408,8 @@ const sendMessage = async () => {
     done: false,
     failed: '',
     thinking: '',
+    retrying: false,
+    retryNotice: '',
   })
   // ⚠️ 必须在**推完之后**再算下标 —— 早一行的话这个下标指向的是用户消息,
   //    客服的回答会写进用户气泡里,而真正的回答气泡一直停在「正在思考…」。
@@ -417,52 +432,42 @@ const runStream = async (question, replyIndex) => {
   const controller = new AbortController()
   streamController = controller
 
-  // 累积的正文(只累加正文,不含思考链)
-  let responseText = ''
-  // 后端发来的失败原因(它用 event:error 事件下发)
-  let serverError = ''
+  // 这一轮的累加器 —— SSE 事件协议只有这一处实现(见 utils/stream-events.js)。
+  // 正文 / 思考链 / 来源 / 重试 / 错误都由它分流,页面只管把状态写进气泡。
+  const collector = createStreamCollector()
 
   try {
     await customerServiceApi.chat({
       question,
       chatId,
       signal: controller.signal,
-      onFrame: ({ event, data }) => {
-        // ⚠️ 必须解析:后端用 JSON 信封,data 是 {"v":"正文"} 而不是正文本身
-        const payload = parseChunkPayload(data)
+      onFrame: (frame) => {
+        collector.push(frame)
         // ⚠️ 可能取不到:用户已经离开这一页,消息数组被换掉了
         const target = messages.value[replyIndex]
         if (!target) return
-        if (event === 'message') {
-          responseText += payload
-          target.content = responseText
-          // ⚠️ **收到分片 ≠ 出正文了**:
-          //    有些模型第一帧只丢一个换行/一个空格过来。不看内容就撤掉加载动画的话,
-          //    屏幕上会空出一段「动画没了、字也没有」的时间 —— 比一直转着更像卡死。
-          target.pending = !responseText.trim()
-        } else if (event === 'thinking') {
-          // 思考链不混进正文,但要攒起来单独显示(等检索/等模型的时候,
-          // 后端可能一个字节都不发,只转圈用户会以为卡死了)
-          // ⚠️ **一律攒起来**,不管正文出没出:后端一帧里可能同时有正文和思考链,
-          //    只在「还没出正文」时攒的话,思考链的后半截会被整段丢掉
-          target.thinking = appendThinking(target.thinking, payload)
-          // 但「正在思考」的提示只在正文还没开始时显示
-          if (!responseText) {
-            target.pending = true
-          }
-        } else if (event === 'error') {
-          serverError = payload
-          // ⚠️ 原因要**记在气泡上**,不能只在「内容为空」时才显示 ——
-          //    客服常常先说一两句才失败,那时内容不为空,错误就整个被吞掉了。
-          target.failed = payload
-        }
+        const s = collector.state
+        target.content = s.text
+        // 思考链不混进正文,但要攒起来单独显示(等检索/等模型的时候,
+        // 后端可能一个字节都不发,只转圈用户会以为卡死了)
+        target.thinking = s.thinking
+        // 后端要重试这一轮(厂商挂起了)—— 显示提示,思考链已经被累加器清掉了
+        target.retrying = s.retrying
+        target.retryNotice = s.retryNotice
+        // ⚠️ 原因要**记在气泡上**,不能只在「内容为空」时才显示 ——
+        //    客服常常先说一两句才失败,那时内容不为空,错误就整个被吞掉了。
+        target.failed = s.error
+        // ⚠️ **收到分片 ≠ 出正文了**:
+        //    有些模型第一帧只丢一个换行/一个空格过来。不看内容就撤掉加载动画的话,
+        //    屏幕上会空出一段「动画没了、字也没有」的时间 —— 比一直转着更像卡死。
+        target.pending = s.retrying || !s.text.trim()
       },
     })
 
     // 流正常结束却一个字都没有 → 给个能看的提示,别留个空气泡
     const target = messages.value[replyIndex]
     if (target && !target.content) {
-      target.content = serverError || '抱歉，这次没查到什么，请换个说法再问一次。'
+      target.content = collector.state.error || '抱歉，这次没查到什么，请换个说法再问一次。'
       target.failed = '' // 原因已经当正文了,别再在下面显示一遍
     }
   } catch (e) {

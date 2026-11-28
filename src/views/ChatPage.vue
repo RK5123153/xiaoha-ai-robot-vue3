@@ -100,10 +100,23 @@
                  后端把它归档在 t_chat_message.reasoning,拉历史时一起带回来 ——
                  刷新页面也能翻出来(见 mapHistory)。
             -->
-            <ThinkingPanel v-if="chat.thinking" :text="chat.thinking" :phase="phaseOf(chat)" />
-            <!-- 没有思考链的模型(不给 reasoning)→ 至少给个转圈 -->
+            <!--
+              后端把这一轮挂起(pause_turn)时,它会**自己重发一次** ——
+              收到 event: retry 就把「正在重试」亮出来。
+              ⚠️ 文案是后端给的(前端不自己另写一套),后端改了这边跟着变。
+            -->
             <div
-              v-else-if="chat.pending"
+              v-if="chat.retrying"
+              class="flex items-center gap-2 text-sm text-gray-400 mb-1"
+            >
+              <LoadingDots size="sm" label="正在重试" />
+              <span class="retry-notice">{{ chat.retryNotice || '正在重试…' }}</span>
+            </div>
+            <ThinkingPanel v-if="chat.thinking" :text="chat.thinking" :phase="phaseOf(chat)" />
+            <!-- 没有思考链的模型(不给 reasoning)→ 至少给个转圈
+                 ⚠️ 重试中不显示这个:上面已经有一条「正在重试」了,两条挨着像故障 -->
+            <div
+              v-else-if="chat.pending && !chat.retrying"
               class="flex items-center gap-2 text-sm text-gray-400 mb-1"
             >
               <LoadingDots size="sm" label="正在思考" />
@@ -115,6 +128,12 @@
               class="text-sm text-gray-400"
             >这次回答没有完成（生成被中断了）。</p>
             <StreamMarkdownRender :content="chat.content" />
+            <!--
+              联网搜索的来源(后端 event: source)—— 折叠在正文下面。
+              ⚠️ 只在**这一轮流式输出时**有:后端没把来源存进归档,
+              刷新页面就看不到了(来源是一次性的「参考资料」,不是回答的一部分)。
+            -->
+            <SourceList v-if="chat.sources && chat.sources.length" :sources="chat.sources" />
             <!-- 用户主动点了「停止」:正文是半截的,标一下免得以为模型就答这么多 -->
             <p
               v-if="chat.stopped && !chat.pending"
@@ -185,12 +204,13 @@ import { message as antMessage } from 'ant-design-vue'
 import StreamMarkdownRender from '@/components/StreamMarkdownRender.vue'
 import LoadingDots from '@/components/LoadingDots.vue'
 import ThinkingPanel from '@/components/ThinkingPanel.vue'
+import SourceList from '@/components/SourceList.vue'
 import MessageActions from '@/components/MessageActions.vue'
 import BrandLogo from '@/components/BrandLogo.vue'
 import ChatInputBox from '@/components/ChatInputBox.vue'
 import ImagePreview from '@/components/ImagePreview.vue'
-import { parseChunkPayload } from '@/utils/sse.js'
-import { appendThinking, phaseOf } from '@/utils/thinking.js'
+import { createStreamCollector } from '@/utils/stream-events.js'
+import { phaseOf } from '@/utils/thinking.js'
 import {
   lastRegenerableId,
   turnIndexOf as turnIndexOfMessage,
@@ -823,11 +843,9 @@ const startStream = async (userMessage, reply) => {
     const webSearch = modelStore.webSearchStatus
     if (webSearch.reason) antMessage.info(webSearch.reason)
 
-    // 累计的流式回答文本（只累加正文，不含思考链）
-    let responseText = ''
-    // 后端发来的失败原因（如「模型输出被 max_tokens 截断…」）。
-    // 后端用 event:error 事件下发,这里存下来,收尾时优先展示,别被通用文案盖掉。
-    let serverError = ''
+    // 这一轮的累加器 —— SSE 事件协议只有这一处实现(见 utils/stream-events.js)。
+    // ⚠️ 正文 / 思考链 / 来源 / 重试 / 错误都由它分流,页面只管把状态写进气泡。
+    const collector = createStreamCollector()
 
     await conversationApi.completion({
       message: userMessage,
@@ -836,54 +854,42 @@ const startStream = async (userMessage, reply) => {
       networkSearch: webSearch.enabled,
       tools: toolStore.toolsParam,
       signal: controller.signal,
-      onFrame: ({ event, data }) => {
-        // ⚠️ 必须解析:后端用 JSON 信封,data 是 {"v":"正文"} 而不是正文本身。
-        //    parseChunkPayload 同时认新旧两种格式,前后端谁先上线都行。
-        const payload = parseChunkPayload(data)
+      onFrame: (frame) => {
         // ⚠️ 收到帧 = 后端已经在处理这一轮了 → 它会把它记进归档
         archived = true
-        if (event === 'message') {
-          responseText += payload
-          target.content = responseText
-          // ⚠️ **收到分片 ≠ 出正文了**:
-          //    有些模型第一帧只丢一个换行/一个空格过来。不看内容就撤掉加载动画的话,
-          //    屏幕上会空出一段「动画没了、字也没有」的时间 —— 比一直转着更像卡死。
-          //    真正有没有东西给用户看,看累积的正文是不是空的。
-          target.pending = !responseText.trim()
-        } else if (event === 'thinking') {
-          // 思考链:**不渲染进正文**(它是模型的内部推理,混进去会污染最终回答),
-          // 但要攒起来单独显示 —— 等模型开口可能很久(要先调工具),
-          // 这期间后端 SSE 一个字节都不发,只转圈用户会以为卡死了;
-          // 思考链里写着它在干什么(「我先并行查询北京、上海…」),那才是有用的等待反馈。
-          //
-          // ⚠️ **一律攒起来**,不管正文出没出:
-          //    后端一帧里可能同时有正文和思考链(OpenAI 协议下思考链和正文是交错的),
-          //    只在「还没出正文」时攒的话,思考链的后半截会被整段丢掉 ——
-          //    用户看到的推理过程是残的,刷新后看归档的全文又对不上。
-          target.thinking = appendThinking(target.thinking, payload)
-          // 但「正在思考」的提示只在正文还没开始时显示 ——
-          // 正文都出来了还转圈,用户会以为卡住了
-          if (!responseText) {
-            target.pending = true
-          }
-        } else if (event === 'error') {
-          serverError = payload
-          // ⚠️ 原因要**记在气泡上**,不能只在「内容为空」时才显示 ——
-          //    模型常常先说一两句才失败(比如被内容审核拦下、或第二轮超时),
-          //    那时内容不为空,错误就整个被吞掉了:用户看到半截回答,像成功了一样,
-          //    根本不知道这一轮其实没答完。
-          if (target) target.failed = payload
-        }
+        collector.push(frame)
+        const s = collector.state
+        target.content = s.text
+        // 思考链**不渲染进正文**(它是模型的内部推理,混进去会污染最终回答),
+        // 但要攒起来单独显示 —— 等模型开口可能很久(要先调工具),
+        // 这期间后端 SSE 一个字节都不发,只转圈用户会以为卡死了;
+        // 思考链里写着它在干什么(「我先并行查询北京、上海…」),那才是有用的等待反馈。
+        target.thinking = s.thinking
+        // 联网搜索的来源(后端 event: source)
+        target.sources = s.sources
+        // 后端要重试这一轮(厂商挂起了)—— 显示提示,思考链已经被累加器清掉了
+        target.retrying = s.retrying
+        target.retryNotice = s.retryNotice
+        // ⚠️ 原因要**记在气泡上**,不能只在「内容为空」时才显示 ——
+        //    模型常常先说一两句才失败(比如被内容审核拦下、或第二轮超时),
+        //    那时内容不为空,错误就整个被吞掉了:用户看到半截回答,像成功了一样,
+        //    根本不知道这一轮其实没答完。
+        target.failed = s.error
+        // ⚠️ **收到分片 ≠ 出正文了**:
+        //    有些模型第一帧只丢一个换行/一个空格过来。不看内容就撤掉加载动画的话,
+        //    屏幕上会空出一段「动画没了、字也没有」的时间 —— 比一直转着更像卡死。
+        //    真正有没有东西给用户看,看累积的正文是不是空的。
+        target.pending = s.retrying || !s.text.trim()
       },
     })
 
     // 流正常结束却一个字都没有 → 给个能看的提示，别留个空气泡
     if (!target.content) {
-      target.content = serverError || '抱歉，模型这次没返回内容，请再试一次。'
+      target.content = collector.state.error || '抱歉，模型这次没返回内容，请再试一次。'
       target.failed = '' // 原因已经当正文了,别再在下面显示一遍
     }
     // ⚠️ 走完了,但后端报告过失败(event:error)→ 不算成功
-    completed = !serverError
+    completed = !collector.state.error
     // 流正常结束 = 后端处理完了 → 这一轮进了归档
     archived = true
   } catch (e) {
@@ -927,8 +933,8 @@ const startStream = async (userMessage, reply) => {
 /**
  * 问一次「这张图里是什么」
  *
- * 走的是 **fetch + ReadableStream**，不是 EventSource ——
- * 上传文件必须用 POST multipart，而 EventSource 只能发 GET。
+ * 走的是 utils/vision.js → api/vision.js → utils/sse.js(基于 fetch-event-source)——
+ * 上传文件必须用 POST multipart,而原生 EventSource 只能发 GET。
  *
  * @param {File} file      要看的图
  * @param {string} question 问什么
@@ -942,38 +948,33 @@ const runVisionRequest = async (file, question, reply) => {
   userStopped = false
   const controller = new AbortController()
   visionController = controller
-  // 后端说「模型没吐出正文」时给的原因(比如思考链把 max_tokens 吃光了)
-  let serverError = ''
+  // 这一轮的累加器状态(后端说「模型没吐出正文」时给的原因也在里面)
+  let state = null
 
   try {
-    await sendVisionStream({
+    state = await sendVisionStream({
       file,
       message: question,
       model: visionModel,
       signal: controller.signal,
-      onThinking: (text) => {
+      // ⚠️ 每帧都把状态写进气泡(累加器在 utils/stream-events.js 里,协议只有那一份)
+      onState: (s) => {
+        target.content = s.text
         // ⚠️ 思考链一律攒起来,不管正文出没出(同文字对话那条链路)
-        target.thinking = appendThinking(target.thinking, text)
-        // 「正在思考」的提示只在正文还没出来时显示
-        if (!target.content) {
-          target.pending = true
-        }
-      },
-      onServerError: (reason) => {
-        serverError = reason
+        target.thinking = s.thinking
+        // 后端要重试这一轮(厂商挂起了)
+        target.retrying = s.retrying
+        target.retryNotice = s.retryNotice
         // ⚠️ 同文字对话:失败原因要记在气泡上,不能只在「内容为空」时才显示
-        target.failed = reason
-      },
-      onChunk: (_delta, all) => {
-        target.content = all
+        target.failed = s.error
         // ⚠️ 同文字对话:空分片不算「出正文了」,加载动画要继续转
         //    (不然会空出一段「动画没了、字也没有」的时间)
-        target.pending = !all.trim()
+        target.pending = s.retrying || !s.text.trim()
       },
     })
     // 流正常结束却一个字都没有 → 给个能看的提示，别留个空气泡
     if (!target.content) {
-      target.content = serverError || '抱歉，模型这次没返回内容，请再试一次。'
+      target.content = state?.error || '抱歉，模型这次没返回内容，请再试一次。'
       target.failed = '' // 原因已经当正文了,别再在下面显示一遍
     }
   } catch (e) {
@@ -1054,7 +1055,7 @@ const sendTextMessage = async () => {
   // 添加一个占位的回复消息。pending 表示"还没出正文",用来显示「正在思考…」
   // turn：这一轮是本次会话的第几轮 —— 交给 renumberTurns 统一编号
   //   (问候语是第 0 轮，没有对应的提问，所以不显示「重新生成」按钮)
-  chatList.value.push({ id: genId(), role: 'assistant', kind: 'text', content: '', pending: true, done: false, failed: '', turn: 0, thinking: '' })
+  chatList.value.push({ id: genId(), role: 'assistant', kind: 'text', content: '', pending: true, done: false, failed: '', turn: 0, thinking: '', sources: [], retrying: false, retryNotice: '' })
   // ⚠️ 抓那条消息的**响应式代理**(不是下标):往上翻页会把老消息拼到前面,
   //    下标会错位 —— 按下标写的话,答案会跑进别的消息里(见 startStream 的说明)
   const reply = chatList.value[chatList.value.length - 1]
@@ -1117,6 +1118,9 @@ const sendVisionMessage = async () => {
     failed: '',
     turn: 0,
     thinking: '',
+    sources: [],
+    retrying: false,
+    retryNotice: '',
   })
   // 给这一轮编号(看图说话的轮次单独数,见 renumberTurns)
   renumberTurns()
@@ -1202,6 +1206,9 @@ const regenerateText = async (idx) => {
     target.stopped = false // ⚠️ 上一轮的「已停止」标记也要清掉
     target.failed = '' // ⚠️ 上一轮的失败标记要清掉,不然重试时那个错误还挂在下面
     target.thinking = '' // ⚠️ 上一轮的思考链也要清掉,不然两轮的思考混在一起看
+    target.sources = [] // ⚠️ 上一轮的联网搜索来源也要清掉(否则旧来源会挂在新的答案下面)
+    target.retrying = false // ⚠️ 上一轮的「正在重试」提示也要清掉
+    target.retryNotice = ''
     scrollToBottom(true)
 
     await startStream(question.content, target)
@@ -1231,6 +1238,8 @@ const regenerateVision = async (idx) => {
   target.stopped = false // ⚠️ 上一轮的「已停止」标记也要清掉
   target.failed = '' // ⚠️ 上一轮的失败标记要清掉,不然重试时那个错误还挂在下面
   target.thinking = '' // ⚠️ 上一轮的思考链也要清掉,不然两轮的思考混在一起看
+  target.retrying = false // ⚠️ 上一轮的「正在重试」提示也要清掉
+  target.retryNotice = ''
   scrollToBottom(true)
 
   await runVisionRequest(question.file, question.content, idx)

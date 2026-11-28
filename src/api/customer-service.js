@@ -10,8 +10,9 @@
  *    </ul>
  *
  * <p>⚠️ <b>事件协议和主聊天完全一致</b>(正文 {@code message} / 思考链 {@code thinking} /
- *    错误 {@code error},data 是 JSON 信封 {@code {"v":"…"}}),所以传输层直接复用
- *    {@link streamSse}、信封拆解直接复用 {@link parseChunkPayload} ——
+ *    来源 {@code source} / 重试 {@code retry} / 错误 {@code error},data 是 JSON 信封
+ *    {@code {"v":"…"}}),所以传输层直接复用 {@link streamSse}、协议分流直接复用
+ *    {@code utils/stream-events.js} ——
  *    <b>别在这儿另写一套</b>:另写一套就意味着「标签页切走会重发一遍 POST」
  *    「后端的失败原因被吃掉」这两个坑要重新踩一次(见 utils/sse.js 的说明)。
  */

@@ -16,13 +16,18 @@
  *   GET  /v9/ai/generateStream  ?message=&image=            → SSE
  *   GET  /v9/ai/generate        ?message=&image=            → 同步一次性返回
  *
- * 事件协议和 /v2/ai 完全一致(SseChatSupport 统一封的):
+ * 事件协议和 /chat/completion 完全一致(后端 SseChatSupport 统一封的):
  *   event: message  → 正文,data 是 JSON 信封 {"v":"..."}
  *   event: thinking → 思考链,只用来维持「正在思考…」提示
+ *   event: source   → 联网搜索的来源(看图说话用不到,但协议统一,照样认)
+ *   event: retry    → 后端要把这一轮重发一次(厂商挂起了)
  *   event: error    → 模型没吐出正文时补发,data 是中文原因
+ *
+ * ⚠️ **协议只在 {@code utils/stream-events.js} 里认一次**,本文件不自己分流 ——
+ *    三个读流的地方各写一份分流,改一处忘了另一处就会「有的页面认 retry、有的不认」。
  */
 
-import { parseChunkPayload } from './sse.js'
+import { createStreamCollector } from './stream-events.js'
 import { visionApi } from '@/api/vision.js'
 
 /** 用户什么都没说时的默认问题(后端也有一份,但这里自己给更可控) */
@@ -36,10 +41,8 @@ export const DEFAULT_QUESTION = '请描述一下这张图片'
  * @param {string} [options.message] 问什么
  * @param {string} [options.model] 模型标识(留空 = 后端用 app.multimodal.default-model)
  * @param {AbortSignal} [options.signal]
- * @param {(delta: string, all: string) => void} [options.onChunk] 收到正文分片
- * @param {(text: string) => void} [options.onThinking] 收到思考链
- * @param {(reason: string) => void} [options.onServerError] 后端说「没答上来」的原因
- * @returns {Promise<string>} 完整的正文
+ * @param {(state: object) => void} [options.onState] 每帧之后回调一次(状态见 utils/stream-events.js)
+ * @returns {Promise<object>} 这一轮结束时的状态(text / thinking / error …)
  * @throws {Error} 失败时抛,message 是能直接展示给人看的中文原因
  */
 export const sendVisionStream = async ({
@@ -47,11 +50,10 @@ export const sendVisionStream = async ({
   message,
   model = '',
   signal,
-  onChunk,
-  onThinking,
-  onServerError,
+  onState,
 }) => {
-  let text = ''
+  // 累加器 —— 事件协议只有这一处实现
+  const collector = createStreamCollector()
 
   // 请求本身交给接口层(它知道往哪个地址发);这里只管「读流」
   await visionApi.submit({
@@ -59,20 +61,13 @@ export const sendVisionStream = async ({
     message: message || DEFAULT_QUESTION,
     model,
     signal,
-    onFrame: ({ event, data }) => {
-      // data 可能是 JSON 信封(现在的后端),也可能是裸文本(老后端)—— 两种都认
-      const payload = parseChunkPayload(data)
-      if (event === 'message') {
-        text += payload
-        onChunk?.(payload, text)
-      } else if (event === 'thinking') {
-        onThinking?.(payload)
-      } else if (event === 'error') {
-        // 模型一条正文都没吐出来(比如思考链把 max_tokens 吃光了)
-        onServerError?.(payload)
-      }
+    onFrame: (frame) => {
+      collector.push(frame)
+      // ⚠️ 每帧都回调:页面要把状态写进**响应式**的气泡里,
+      //    自己不在这里攒(攒在普通对象里界面不会更新)。
+      onState?.(collector.state)
     },
   })
 
-  return text
+  return collector.state
 }

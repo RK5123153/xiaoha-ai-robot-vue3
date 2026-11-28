@@ -17,18 +17,29 @@
  *   2. `onerror` 默认不抛异常时会**无限重连** —— 每重连一次就是重发一次。
  *
  * 所以这个文件是**一层壳**:把库的旋钮拧到适合 POST 的位置,
- * 再补上这个项目要的三样东西(空闲超时 / 后端错误原因 / 取消的语义),
+ * 再补上这个项目要的四样东西(空闲超时 / 后端错误原因 / 取消的语义 / 断在哪),
  * 页面和接口层**只跟这一层打交道**,永远不直接调 fetchEventSource。
  *
- * ── 这一层加的三样东西(库里没有)────────────────────────────────────
+ * ── 这一层加的四样东西(库里没有)────────────────────────────────────
  *
  *   1. **空闲超时**:后端**不发心跳**(思考阶段一个字节都不发),
- *      连接真死了和「模型在想」从外面看一模一样 → 3 分钟没等到完整帧就掐断。
+ *      连接真死了和「模型在想」从外面看一模一样 → 太久没等到完整帧就掐断。
+ *      ⚠️ 但**页面藏起来时不按墙上时钟判超时**(见下面的 HIDDEN_IDLE_TIMEOUT)。
  *   2. **后端的失败原因**:库默认的 onopen 只看 content-type,
  *      后端那句「provider 'bailian' 没有配置 API key」会被吃掉;
  *      这里把 JSON 错误体里的 message 挖出来原样抛出去。
  *   3. **取消的语义**:库收到 abort 是**正常 resolve**(不算错),
  *      上层分不出「用户主动停了」和「流正常结束」→ 这里把它还原成 AbortError。
+ *   4. **「线是在哪儿断的」**:页面在后台时浏览器会回收长连接,
+ *      这跟「后端没起来」是两回事 —— 后者让用户去重启后端,后者重启一点用没有。
+ *      这里把两者分开,给出对得上的原因。
+ *
+ * ── 后端心跳(event: ping)──────────────────────────────────────────
+ *
+ * 后端**目前还没发**心跳;这一层已经先认了它:收到就在传输层消化掉
+ * (证明「线还通着」,顺便把空闲上限收紧到 60 秒),**不往上层传** ——
+ * 页面不需要知道有这东西,传上去还得每个页面都写一遍「忽略 ping」。
+ * 后端哪天加上了,前端不用改。
  *
  * ── 为什么还留着「JSON 信封」那套 ───────────────────────────────────
  *
@@ -37,23 +48,58 @@
  * 缩进被吃掉,代码块就散了,而且前端修不了(空格已经没了)。
  * 把内容包进 JSON 就彻底绕开:data 值以 `{` 开头,没有空格可剥,
  * 而且 JSON 会把换行转义成 \n,一个分片永远只占一行。
- * → 后端用 JSON 信封,前端用 {@link parseChunkPayload} 拆信封(两种格式都认,
- *   前后端谁先上线都行)。
+ * → 拆信封的 {@link parseChunkPayload} 和**事件协议**一起放在
+ *   {@code utils/stream-events.js}(那一层管「帧是什么意思」,本层只管「字节怎么变成帧」)。
  */
 
 import { fetchEventSource } from '@microsoft/fetch-event-source'
 import { combineSignals, readErrorMessage } from '@/api/base.js'
 
 /**
- * 空闲多久算「流断了」(ms)
+ * 空闲多久算「流断了」(ms)—— 页面**可见**时
  *
- * <p>⚠️ 为什么给得这么宽(3 分钟):
- *   后端**没有心跳机制** —— 思考阶段它一个字节都不发(只有具名事件)。
- *   所以模型「想得久」和「连接死了」从外面看是一样的:什么都不来。
- *   定得太短会把正常的慢请求掐掉(用户白等一场,答案还丢了),
- *   定得太长又等于没有 —— 3 分钟是「慢到离谱」和「彻底死了」之间的折中。
+ * <p>⚠️ 为什么给得这么宽(5 分钟):
+ *   <ul>
+ *     <li>后端**没有心跳机制** —— 思考阶段它一个字节都不发(只有具名事件),
+ *         所以模型「想得久」和「连接死了」从外面看是一样的:什么都不来。</li>
+ *     <li>后端的模型超时是 240 秒(app.models.*.timeout-seconds),
+ *         整条流的总时限是 300 秒(app.sse.timeout-ms)。
+ *         <b>前端不能比后端先放弃</b> —— 早于 300 秒掐流,
+ *         等于把后端本来还能答出来的请求砍掉,用户白等一场、答案还丢了。</li>
+ *   </ul>
+ *   所以这里取 300 秒:和后端的总时限一样长,后端先收尾,前端只是兜底。
  */
-const DEFAULT_IDLE_TIMEOUT = 180000
+const DEFAULT_IDLE_TIMEOUT = 300000
+
+/**
+ * 页面**看不见**时的空闲上限(ms)
+ *
+ * <p>⚠️ 这是教程(《联网搜索 Bug 修复:连接断开问题》)漏掉的另一半:
+ *   教程给的 {@code openWhenHidden: true} 只解决了「库自己主动 abort」这一半 ——
+ *   另一半是**我们自己这个空闲看门狗**:它按墙上时钟算,页面切到后台 3 分钟
+ *   照样掐流。而那 3 分钟里模型可能正在联网搜索 / 等工具(后端一个字节都不发),
+ *   掐了它,用户切回来看到的就是半截答案 —— 正是教程里说的
+ *   「勾选联网搜索时切到别的界面,就答不出来」。
+ *
+ * <p>页面藏着的时候用户根本看不见「转圈」,按墙上钟判超时对谁都没意义。
+ * 但**也不能真的放到无限**:dev 的 vite 代理会把「上游连接被重置」吞掉
+ * (浏览器那边表现为一直挂着、不报错),真死了一条线就永远挂着,用户切回来只看到一个
+ * 转圈的空气泡。所以给一个**比后端总时限(app.sse.timeout-ms = 5 分钟)还宽**的兜底:
+ *   <ul>
+ *     <li>比后端宽 → 绝不会掐掉一条后端本来还能答完的流;</li>
+ *     <li>不是无限 → 万一有连接真的楔住了,10 分钟后也会收场。</li>
+ *   </ul>
+ */
+const HIDDEN_IDLE_TIMEOUT = 600000
+
+/**
+ * 见过后端心跳之后的空闲上限(ms)
+ *
+ * <p>后端发心跳(event: ping)说明「线还通着」—— 那之后长时间没动静就真的是断了,
+ * 可以用短得多的上限,用户不用干等 5 分钟才发现连接死了。
+ * 没见过心跳(老后端)就还按 {@link DEFAULT_IDLE_TIMEOUT} 兜底,别误杀慢请求。
+ */
+const HEARTBEAT_IDLE_TIMEOUT = 60000
 
 /**
  * 发一个 SSE 请求,逐帧回调
@@ -83,19 +129,63 @@ export const streamSse = async ({
   let timedOut = false
 
   /**
+   * 页面在**看不见**的时候,线断过没有?
+   *
+   * <p>用来分清两种同样表现为「Failed to fetch」的失败:
+   *   <ul>
+   *     <li>线是在页面藏着的时候断的 → 几乎都是**浏览器回收了后台的长连接**
+   *         (切到别的程序、系统休眠、换网络都会)→ 让用户去重启后端是白折腾;</li>
+   *     <li>线是在用户眼皮底下断的 → 那才可能是后端真的挂了。</li>
+   *   </ul>
+   */
+  let hiddenDuringStream = false
+
+  /** 见过后端心跳没有 —— 见过就说明「线还通着」这件事是可证的 */
+  let sawHeartbeat = false
+
+  /**
    * 空闲看门狗
    *
    * <p>每来一帧就重新计时 —— 「多久没有**完整的一帧**」才是用户体感上的等待。
+   *
+   * <p>⚠️ 上限是**跟着页面可见性走的**(见 {@link HIDDEN_IDLE_TIMEOUT}):
+   *    页面藏着的时候不掐流,切回来了再重新计时。
    */
   let timer = null
+
+  /** 这一刻生效的空闲上限 */
+  const currentIdleLimit = () => {
+    // 调用方显式关掉了超时(idleTimeout = 0)→ 就别自作主张加回来
+    if (!idleTimeout) return 0
+    if (isHidden()) return HIDDEN_IDLE_TIMEOUT
+    // 见过心跳 → 空这么久就是真的断了,不用让用户干等
+    if (sawHeartbeat) return Math.min(idleTimeout, HEARTBEAT_IDLE_TIMEOUT)
+    return idleTimeout
+  }
+
   const arm = () => {
-    if (!idleTimeout) return
     clearTimeout(timer)
+    timer = null
+    const limit = currentIdleLimit()
+    if (!limit) return
     timer = setTimeout(() => {
       timedOut = true
       timeoutController.abort()
-    }, idleTimeout)
+    }, limit)
   }
+
+  /**
+   * 页面可见性变了 → 换一套空闲上限,重新计时
+   *
+   * <p>切回前台时重新计时(而不是接着算隐藏期间的时间):
+   *   用户刚回来,页面上的「转圈」应该重新给一段完整的等待时间,
+   *   而不是一回来就超时。
+   */
+  const onVisibilityChange = () => {
+    if (isHidden()) hiddenDuringStream = true
+    arm()
+  }
+  document.addEventListener('visibilitychange', onVisibilityChange)
 
   // 调用方的取消 + 我们的超时,合成一个信号交给库
   const combined = combineSignals(timeoutController.signal, signal)
@@ -122,6 +212,10 @@ export const streamSse = async ({
 
       // ⚠️⚠️ **必须**开着:关掉的话,标签页一被藏起来库就 abort 掉请求,
       //    切回来时**重新 POST 一次** —— 同一条提问被后端收两遍,记忆里多一轮。
+      //
+      //    ⚠️ 但它只解决「库自己主动断」这一半。另一半是**我们自己的空闲看门狗**
+      //    (见 HIDDEN_IDLE_TIMEOUT)—— 页面切到后台时它照样会按墙上时钟掐流,
+      //    那才是教程里「联网搜索时切到别的界面就答不出来」的真正凶手。
       openWhenHidden: true,
 
       /**
@@ -154,6 +248,14 @@ export const streamSse = async ({
        *    这里统一成 `message`,页面那边就不用管这个差别了。
        */
       onmessage: (msg) => {
+        // 后端心跳(event: ping):模型沉默时定期发,用来证明「线还通着」。
+        // ⚠️ 只在传输层消化,**不往上层传** —— 页面不需要知道有这东西,
+        //    传上去还得每个页面都写一遍「忽略 ping」,漏一个就多一个空分支。
+        if (msg.event === 'ping') {
+          sawHeartbeat = true
+          arm()
+          return
+        }
         arm()
         onFrame?.({ event: msg.event || 'message', data: msg.data })
       },
@@ -172,7 +274,9 @@ export const streamSse = async ({
     })
 
     // 走到这儿说明是「正常结束」或者「被 abort 了」
-    if (timedOut) throw new Error('连接超时，模型长时间没有回应')
+    //
+    // ⚠️ 顺序:先看「用户主动取消」,再看「超时」——
+    //    两个同时发生时(用户点停止的那一刻正好到点),用户的意思更该听用户的。
     if (signal?.aborted) {
       // ⚠️ 库收到 abort 是**正常 resolve**,不算错 —— 上层靠这个区分「用户主动停了」
       //    和「流正常结束」,这里把它还原成 AbortError。
@@ -180,6 +284,7 @@ export const streamSse = async ({
       err.name = 'AbortError'
       throw err
     }
+    if (timedOut) throw new Error('连接超时，模型长时间没有回应')
   } catch (e) {
     // 用户自己掐断的(切会话/点停止)—— 原样抛出去,上层认 e.name
     if (e.name === 'AbortError') throw e
@@ -189,12 +294,42 @@ export const streamSse = async ({
     if (e.kind === 'http') throw e
     // 网络层面的失败(后端没起、端口不通、跨域被拒)
     if (isNetworkError(e)) {
-      throw new Error('网络连接失败，请检查后端服务是否在运行')
+      // ⚠️ **别一股脑甩锅给后端**:线是在页面藏着的时候断的,几乎都是浏览器回收了后台的长连接
+      //    (教程里那个场景)。让用户去重启后端一点用没有 —— 后端好好的。
+      //    ⚠️ 两个信号都要看:
+      //      · isHidden()          —— 此刻页面还藏着(线断的时候人不在);
+      //      · hiddenDuringStream  —— 这条流期间页面被藏过(报错是切回来之后才处理到的,
+      //        比如页面被浏览器冻结过:冻结期间不跑 JS,连接断了要等解冻才报)。
+      if (isHidden() || hiddenDuringStream) {
+        const err = new Error(
+          '连接在页面切到后台期间被中断（浏览器会回收后台的长时间连接）。切回页面后可以重新发送一次；如果反复出现，请检查后端服务是否在运行'
+        )
+        err.kind = 'disconnected'
+        throw err
+      }
+      const err = new Error('网络连接失败，请检查后端服务是否在运行')
+      err.kind = 'network'
+      throw err
     }
     throw e
   } finally {
     clearTimeout(timer)
+    // ⚠️ 监听器必须摘掉:一条流一个,聊天页能连开好几条,漏摘就攒一堆死监听器。
+    document.removeEventListener('visibilitychange', onVisibilityChange)
   }
+}
+
+/**
+ * 页面现在是不是看不见
+ *
+ * <p>用 {@code visibilityState} 而不是 {@code document.hidden}:
+ *   后者在老内核里可能是 undefined,判断会一律当成「可见」。
+ *
+ * @returns {boolean}
+ */
+const isHidden = () => {
+  if (typeof document === 'undefined') return false
+  return document.visibilityState === 'hidden'
 }
 
 /**
@@ -219,34 +354,10 @@ const isNetworkError = (e) => {
 }
 
 /**
- * 信封的识别:必须是 {"v": 开头
+ * 信封的识别和拆包 —— **搬到了 {@code utils/stream-events.js}**
  *
- * <p>为什么不直接 JSON.parse 所有分片?
- *   1. 快路径 —— 绝大多数分片不是 JSON,省一次 try/catch
- *   2. 旧格式的模型正文里可能**本身就是**一段 JSON(比如用户问「给我一段 JSON」),
- *      那种情况下必须原样显示,不能被当成信封拆开
+ * <p>⚠️ 为什么搬:「帧是什么意思」是**协议层**的事(正文 / 思考链 / 来源 / 重试 / 错误),
+ *    和「字节怎么变成帧」(本文件的传输层)是两件事。放一起的话,协议一改
+ *    就要动传输层 —— 而传输层是最不该被业务协议牵着走的地方。
  */
-const ENVELOPE_HEAD = /^\{\s*"v"\s*:/
 
-/**
- * 解析一个 SSE 分片的负载
- *
- * @param {string} raw event.data 的原始内容
- * @returns {string} 分片正文;空输入返回空字符串
- */
-export const parseChunkPayload = (raw) => {
-  if (typeof raw !== 'string' || raw === '') return ''
-  // 旧格式(后端还没改成 JSON 信封):原样返回
-  if (!ENVELOPE_HEAD.test(raw)) return raw
-
-  try {
-    const parsed = JSON.parse(raw)
-    // 只要有字符串类型的 v 字段就当信封拆开 —— 不要求「只有 v 一个键」。
-    // 后端以后给信封加字段(seq / type / done)时,前端不用跟着改。
-    // 代价是模型正文正好写成 {"v":...} 时会被拆开,但那种情况很罕见。
-    if (parsed && typeof parsed.v === 'string') return parsed.v
-  } catch {
-    // 不是合法 JSON(半截分片、被截断的信封)→ 退回旧格式的处理方式
-  }
-  return raw
-}
